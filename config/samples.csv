@@ -1,0 +1,15 @@
+group,rep,read,path
+CD24Mid,1,R1,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Mid_45-U-Neg_1_A.fq.gz
+CD24Mid,1,R2,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Mid_45-U-Neg_1_B.fq.gz
+CD24Mid,3,R1,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Mid_45-U-Neg_3_A.fq.gz
+CD24Mid,3,R2,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Mid_45-U-Neg_3_B.fq.gz
+CD24Neg,4,R1,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Neg_45-U-Neg_4_A.fq.gz
+CD24Neg,4,R2,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Neg_45-U-Neg_4_B.fq.gz
+CD24Mid,5,R1,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Mid_45-U-Neg_5_A.fq.gz
+CD24Mid,5,R2,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Mid_45-U-Neg_5_B.fq.gz
+CD24Neg,6,R1,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Neg_45-U-Neg_6_A.fq.gz
+CD24Neg,6,R2,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Neg_45-U-Neg_6_B.fq.gz
+CD24Mid,7,R1,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Mid_45-U-Neg_7_A.fq.gz
+CD24Mid,7,R2,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Mid_45-U-Neg_7_B.fq.gz
+CD24Neg,8,R1,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Neg_45-U-Neg_8_A.fq.gz
+CD24Neg,8,R2,/media/stephen/Data/RNA-Seq/analysis/fastq/CD24Neg_45-U-Neg_8_B.fq.gz

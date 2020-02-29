@@ -1,0 +1,9 @@
+data : /media/stephen/Data/RNA-Seq/config/samples.csv
+
+genome : /media/stephen/Data/genomes/GRCm38/Mus_musculus.GRCm38.dna.primary_assembly.fa.gz
+
+build : GRCm38
+
+annotation : /media/stephen/Data/genomes/GRCm38/annotation/Mus_musculus.GRCm38.99.gtf.gz
+
+outdir : /media/stephen/Data/RNA-Seq/analysis
