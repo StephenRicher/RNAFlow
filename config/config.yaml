@@ -4,6 +4,8 @@ genome : /media/stephen/Data/genomes/GRCm38/Mus_musculus.GRCm38.dna.primary_asse
 
 build : GRCm38
 
-annotation : /media/stephen/Data/genomes/GRCm38/annotation/Mus_musculus.GRCm38.99.gtf.gz
+annotation : /media/stephen/Data/genomes/GRCm38/annotation/Mus_musculus.GRCm38.99.gtf
 
 outdir : /media/stephen/Data/RNA-Seq/analysis
+
+fastq_screen_config : /media/stephen/Data/RNA-Seq/config/fastq_screen.config

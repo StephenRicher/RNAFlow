@@ -1,9 +1,9 @@
 import pandas as pd
 
 wildcard_constraints:
-    group = '[^\/-]+',
-    sample = '[^\-]+-\d+',
-    single = '[^\-]+-\d+-R[12]',
+    group = '[^\/\s.-]+',
+    sample = '[^\/\s.-]+-\d+',
+    single = '[^\/\s.-]+-\d+-R[12]',
     rep = '\d+',
     read = 'R[12]'
 
@@ -15,7 +15,8 @@ SCRIPTS = f'{BASE}/workflow/scripts'
 configfile : f'{BASE}/config/config.yaml'
 GENOME = config['genome']
 BUILD = config['build']
-ANNOTATION = config['annotation']
+FASTQ_SCREEN_CONFIG = config['fastq_screen_config']
+ANNOTATION = config['annotation'] # Must NOT be gzipped
 
 try:
     OVERHANG = config['read_length'] - 1
@@ -30,7 +31,7 @@ DATA_TABLE = config['data']
 DATA = pd.read_table(config['data'], sep = ',', dtype = {'rep' : str})
 
 # Validate read file input with wildcard definitions
-if not DATA['group'].str.match(r'[^-\/]+').all():
+if not DATA['group'].str.match(r'[^\/\s.-]+').all():
     sys.exit(f'Invalid group definition in {DATA_TABLE}.')
 if not DATA['rep'].str.match(r'\d+').all():
     sys.exit(f'Invalid replicate definition in {DATA_TABLE}.')
@@ -57,7 +58,7 @@ THREADS = 1
 
 rule all:
     input:
-        ['multiqc_report.html', f'genome/{BUILD}.fa.gz.fai']
+        ['multiqc_report.html', 'qc/multibamqc', f'genome/{BUILD}.fa.gz.fai']
 
 rule bgzip_genome:
     input:
@@ -105,44 +106,20 @@ rule fastqc:
     input:
         lambda wc: DATA.xs(wc.single, level = 2)['path']
     output:
-        html = 'qc/{single}-fastqc.html',
-        zip = 'qc/{single}-fastqc.zip'
+        html = 'qc/{single}.fastqc.html',
+        zip = 'qc/{single}.fastqc.zip'
     log:
         'logs/fastqc/{single}.log'
     wrapper:
         '0.49.0/bio/fastqc'
 
-#rule trimmomatic:
-#    input:
-#        lambda wc: DATA.xs(wc.sample, level = 1)['path']
-#    output:
-#        r1_paired = 'fastq/{sample}-R1-trim.fq.gz',
-#        r1_unpaired = 'fastq/{sample}-R1-trim-unpaired.fq.gz',
-#        r2_paired = 'fastq/{sample}-R2-trim.fq.gz',
-#        r2_unpaired = 'fastq/{sample}-R2-trim-unpaired.fq.gz',
-#        qc = 'qc/{sample}-trimmomatic.txt'
-#    log:
-#        'logs/trimmomatic/{sample}.log'
-#    conda:
-#        f'{ENVS}/trimmomatic.yaml'
-#    threads:
-#        THREADS
-#    shell:
-#        'trimmomatic PE '
-#            '{input} -threads {threads} -trimlog {output.qc} '
-#            '{output.r1_paired} {output.r1_unpaired} '
-#            '{output.r2_paired} {output.r2_unpaired} '
-#            'ILLUMINACLIP:TruSeq3-PE.fa:2:30:10 '
-#            'LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:20 '
-#        '&> {log}'
-
 rule cutadapt:
     input:
         lambda wc: DATA.xs(wc.sample, level = 1)['path']
     output:
-        r1 = 'fastq/trimmed/{sample}-R1-trim.fq.gz',
-        r2 = 'fastq/trimmed/{sample}-R2-trim.fq.gz',
-        qc = 'qc/{sample}-cutadapt.txt'
+        r1 = 'fastq/trimmed/{sample}-R1.trim.fastq.gz',
+        r2 = 'fastq/trimmed/{sample}-R2.trim.fastq.gz',
+        qc = 'qc/{sample}.cutadapt.txt'
     params:
         adapters = '-a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA '
                    '-A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT',
@@ -161,12 +138,29 @@ rule cutadapt:
             '{input} > {output.qc} '
         '2> {log}'
 
+rule fastq_screen:
+    input:
+        'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
+    output:
+        txt = 'qc/{sample}-{read}.fastq_screen.txt',
+        png = 'qc/{sample}-{read}.fastq_screen.png'
+    params:
+        fastq_screen_config = FASTQ_SCREEN_CONFIG,
+        subset = 100000,
+        aligner = 'bowtie2'
+    log:
+        'logs/fastq_screen/{sample}-{read}.log'
+    threads:
+        8
+    wrapper:
+        "0.49.0/bio/fastq_screen"
+
 rule fastqc_trimmed:
     input:
-        'fastq/trimmed/{sample}-{read}-trim.fq.gz'
+        'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
     output:
-        html = 'qc/{sample}-{read}-trim-fastqc.html',
-        zip = 'qc/{sample}-{read}-trim-fastqc.zip'
+        html = 'qc/{sample}-{read}.trim.fastqc.html',
+        zip = 'qc/{sample}-{read}.trim.fastqc.zip'
     log:
         'logs/fastqc_trimmed/{sample}-{read}.log'
     wrapper:
@@ -177,8 +171,8 @@ rule STAR_map:
         fastq = [rules.cutadapt.output.r1, rules.cutadapt.output.r2],
         idx_dir = rules.STAR_index.output
     output:
-        bam = 'mapped/{sample}.out.bam',
-        qc = 'qc/{sample}-STAR.txt'
+        bam = 'mapped/{sample}.sorted.bam',
+        qc = 'qc/{sample}.STAR.txt'
     log:
         'logs/STAR_map/{sample}.log'
     conda:
@@ -199,8 +193,8 @@ rule hisat2_map:
         fastq_r1 = rules.cutadapt.output.r1,
         fastq_r2 = rules.cutadapt.output.r2
     output:
-        sam = 'mapped/{sample}.sam',
-        qc = 'qc/{sample}-hisat2.txt'
+        bam = 'mapped/{sample}.bam',
+        qc = 'qc/{sample}.hisat2.txt'
     params:
         index = '/media/stephen/Data/genomes/GRCm38/index/GRCm38'
     log:
@@ -210,18 +204,18 @@ rule hisat2_map:
     threads:
         12
     shell:
-        'hisat2 '
-            '-x {params.index} -p 4 '
+        '(hisat2 '
+            '-x {params.index} -p 6 '
             '-1 {input.fastq_r1} -2 {input.fastq_r2} '
             '--summary-file {output.qc} '
-        '> {output.sam} '
+        '| samtools view -b > {output.bam}) '
         '2> {log}'
 
 rule samtools_sort:
     input:
-        rules.hisat2_map.output.sam
+        rules.hisat2_map.output.bam
     output:
-        'mapped/{sample}.bam',
+        'mapped/{sample}.sort.bam',
     log:
         'logs/samtools_sort/{sample}.log'
     conda:
@@ -229,8 +223,7 @@ rule samtools_sort:
     threads:
         12
     shell:
-        'samtools sort -@ 2 {input} > {output} 2> {log}'
-
+        'samtools sort -@ 6 {input} > {output} 2> {log}'
 
 rule index_bam:
     input:
@@ -246,14 +239,14 @@ rule index_bam:
     threads:
         12
     shell:
-        'samtools index -@ 2 {input} &> {log}'
+        'samtools index -@ 6 {input} &> {log}'
 
 rule samtools_stats:
     input:
         rules.samtools_sort.output
         #rules.STAR_map.output.bam
     output:
-        'qc/{sample}-stats.txt'
+        'qc/{sample}.stats.txt'
     group:
         'SAM_QC'
     log:
@@ -269,7 +262,7 @@ rule samtools_idxstats:
         #rules.STAR_map.output.bam,
         rules.index_bam.output
     output:
-        'qc/{sample}-idxstats.txt'
+        'qc/{sample}.idxstats.txt'
     group:
         'SAM_QC'
     log:
@@ -284,7 +277,7 @@ rule samtools_flagstat:
         rules.samtools_sort.output
         #rules.STAR_map.output.bam
     output:
-        'qc/{sample}-flagstat.txt'
+        'qc/{sample}.flagstat.txt'
     group:
         'SAM_QC'
     log:
@@ -299,8 +292,9 @@ rule bamqc:
         rules.samtools_sort.output
         #rules.STAR_map.output.bam
     output:
-        file = 'qc/{sample}-bamqc.html',
-        dir = directory('qc/bamqc/{sample}/')
+        directory('qc/bamqc/{sample}')
+    resources:
+        mem_mb = 3000
     log:
         'logs/bamqc/{sample}.log'
     conda:
@@ -309,9 +303,9 @@ rule bamqc:
         12
     shell:
         'qualimap bamqc '
-            '-bam {input} -gff {ANNOTATION} '
-            '-outdir {output.dir} -outfile {output.file} '
-            '-nt 2 --outside-stats '
+            '-bam {input} -gff {ANNOTATION} -outdir {output} '
+            '-nt 6 --outside-stats --java-mem-size={resources.mem_mb}M '
+            '--paint-chromosome-limits '
         '&> {log}'
 
 rule rnaqc:
@@ -319,34 +313,64 @@ rule rnaqc:
         rules.samtools_sort.output
         #rules.STAR_map.output.bam
     output:
-        file = 'qc/{sample}-rnaqc.html',
-        dir = directory('qc/rnaqc/{sample}')
+        directory('qc/rnaqc/{sample}')
+    resources:
+        mem_mb = 3000
     log:
         'logs/rnaqc/{sample}.log'
     conda:
         f'{ENVS}/qualimap.yaml'
-    threads:
-        12
     shell:
-        'qualimap rnaqc '
-            '-bam {input} -gff {ANNOTATION} '
-            '-outdir {output.dir} -outfile {output.file} '
-            '-nt 2 --outside-stats '
+        'qualimap rnaseq '
+            '-bam {input} -gtf {ANNOTATION} -outdir {output} '
+            '--java-mem-size={resources.mem_mb}M '
+        '&> {log}'
+
+rule multibamqc_config:
+    input:
+        expand('qc/bamqc/{sample}', sample = SAMPLES)
+    output:
+        'qc/bamqc/multibamqc.config'
+    group:
+        'multiBAM_QC'
+    log:
+        'logs/multibamqc_config/multibamqc_config.log'
+    conda:
+        f'{ENVS}/python3.yaml'
+    shell:
+        '{SCRIPTS}/multibamqc_config.py {input} > {output} 2> {log}'
+
+rule multibamqc:
+    input:
+        rules.multibamqc_config.output
+    output:
+        directory('qc/multibamqc')
+    group:
+        'multiBAM_QC'
+    log:
+        'logs/multibamqc/multibamqc.log'
+    conda:
+        f'{ENVS}/qualimap.yaml'
+    shell:
+        'qualimap multi-bamqc '
+            '--data {input} -outdir {output} '
         '&> {log}'
 
 rule multiqc:
     input:
-        expand('qc/{sample}-{read}-fastqc.html',
+        expand('qc/{sample}-{read}.fastqc.zip',
             sample = SAMPLES, read = READS),
-        expand('qc/{sample}-cutadapt.txt', sample = SAMPLES),
-        expand('qc/{sample}-{read}-trim-fastqc.html',
+        expand('qc/{sample}-{read}.fastq_screen.txt',
+            sample = SAMPLES, read = READS),
+        expand('qc/{sample}.cutadapt.txt', sample = SAMPLES),
+        expand('qc/{sample}-{read}.trim.fastqc.zip',
             sample = SAMPLES, read = READS),
         #expand('qc/{sample}-STAR.txt', sample = SAMPLES),
-        expand('qc/{sample}-stats.txt', sample = SAMPLES),
-        expand('qc/{sample}-idxstats.txt', sample = SAMPLES),
-        expand('qc/{sample}-flagstat.txt', sample = SAMPLES),
-        expand('qc/{sample}-bamqc.html', sample = SAMPLES),
-        expand('qc/{sample}-rnaqc.html', sample = SAMPLES)
+        expand('qc/{sample}.stats.txt', sample = SAMPLES),
+        expand('qc/{sample}.idxstats.txt', sample = SAMPLES),
+        expand('qc/{sample}.flagstat.txt', sample = SAMPLES),
+        expand('qc/bamqc/{sample}', sample = SAMPLES),
+        expand('qc/rnaqc/{sample}', sample = SAMPLES),
     output:
         'multiqc_report.html'
     log:
