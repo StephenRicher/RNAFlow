@@ -17,7 +17,7 @@ main() {
         $0 ~ /^Filename/ {$2 = sample} {print $0}' "${path}" > "${TEMP}"
       mv "${TEMP}" "${path}"
       zip -mq "${fastqc_out}" "${path}"
-
+      rmdir $(dirname "${path}")
     fi
 }
 
