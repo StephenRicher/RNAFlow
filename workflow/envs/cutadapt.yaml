@@ -1,6 +1,4 @@
 channels :
-  - conda-forge
   - bioconda
 dependencies :
   - cutadapt
-  - gawk=5.0.1
