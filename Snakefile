@@ -135,7 +135,7 @@ rule cutadapt:
     output:
         r1 = 'fastq/trimmed/{sample}-R1.trim.fastq.gz',
         r2 = 'fastq/trimmed/{sample}-R2.trim.fastq.gz',
-        qc = pipe('qc/cutadapt/unmod/{sample}.cutadapt.txt')
+        qc = 'qc/cutadapt/unmod/{sample}.cutadapt.txt'
     group:
         'cutadapt'
     params:
@@ -152,7 +152,7 @@ rule cutadapt:
     shell:
         'cutadapt '
             '{params.adapters} {params.others} --cores {THREADS} '
-            '-o {output.r1} -p {output.r2} {input} '
+            '-o {output.r1} -p {output.r2} {input} > {output.qc} '
         '2> {log}'
 
 rule modify_cutadapt:
