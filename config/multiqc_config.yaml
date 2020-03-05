@@ -15,6 +15,7 @@ module_order:
     - bowtie2
     - qualimap
     - samtools
+    - featureCounts
 
 extra_fn_clean_exts:
     - '.'

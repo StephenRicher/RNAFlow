@@ -168,7 +168,7 @@ rule modify_cutadapt:
         f'{ENVS}/coreutils.yaml'
     shell:
         'awk -v sample={wildcards.sample} '
-            '-f {SCRIPTS}/modify_cutadapt.awk > {output} 2> {log}'
+            '-f {SCRIPTS}/modify_cutadapt.awk {input} > {output} 2> {log}'
 
 rule fastq_screen:
     input:
@@ -290,9 +290,9 @@ rule samtools_stats:
 
 rule samtools_idxstats:
     input:
-        rules.samtools_sort.output,
-        #rules.STAR_map.output.bam,
-        rules.index_bam.output
+        bam = rules.samtools_sort.output,
+        #bam = rules.STAR_map.output.bam,
+        index = rules.index_bam.output
     output:
         'qc/samtools/idxstats/{sample}.idxstats.txt'
     group:
@@ -302,7 +302,7 @@ rule samtools_idxstats:
     conda:
         f'{ENVS}/samtools.yaml'
     shell:
-        'samtools idxstats {input} > {output} 2> {log}'
+        'samtools idxstats {input.bam} > {output} 2> {log}'
 
 rule samtools_flagstat:
     input:
@@ -390,19 +390,21 @@ rule multibamqc:
 
 rule featureCounts:
     input:
-        rules.samtools_sort.output,
-        #rules.STAR_map.output.bam,
+        bam = rules.samtools_sort.output,
+        #bam = rules.STAR_map.output.bam,
         gtf = ANNOTATION
     output:
-        'counts/{sample}.featureCounts.txt'
+        counts = 'counts/{sample}.featureCounts.txt',
+        qc = 'qc/featurecounts/{sample}.featureCounts.txt.summary'
     log:
         'logs/featureCounts/{sample}.log'
     conda:
         f'{ENVS}/subread.yaml'
     shell:
-        'featureCounts '
+        '(featureCounts '
             '--primary -C -t exon -g gene_id '
-            '-a {input.gtf} -o {output} {input} '
+            '-a {input.gtf} -o {output.counts} {input.bam} '
+        '&& mv {output.counts}.summary {output.qc}) '
         '&> {log}'
 
 rule multiqc:
@@ -421,7 +423,8 @@ rule multiqc:
         expand('qc/bamqc/{sample}', sample = SAMPLES),
         expand('qc/rnaqc/{sample}', sample = SAMPLES),
         expand('qc/rnaqc/{sample}', sample = SAMPLES),
-        expand('counts/{sample}.featureCounts.txt', sample = SAMPLES)
+        expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
+            sample = SAMPLES)
     output:
         directory('qc/multiqc')
     log:
@@ -429,6 +432,6 @@ rule multiqc:
     conda:
         f'{ENVS}/multiqc.yaml'
     shell:
-        'multiqc -outdir {output}'
+        'multiqc --outdir {output} '
             '--force --config {BASE}/config/multiqc_config.yaml {input} '
         '&> {log}'
