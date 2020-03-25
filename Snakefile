@@ -1,12 +1,5 @@
 import pandas as pd
 
-wildcard_constraints:
-    group = '[^\/\s.-]+',
-    sample = '[^\/\s.-]+-\d+',
-    single = '[^\/\s.-]+-\d+-R[12]',
-    rep = '\d+',
-    read = 'R[12]'
-
 BASE = workflow.basedir
 
 ENVS = f'{BASE}/workflow/envs'
@@ -38,23 +31,62 @@ if not DATA['rep'].str.match(r'\d+').all():
 if not DATA['read'].str.match(r'R[12]').all():
     sys.exit(f'Invalid read definition in {DATA_TABLE}.')
 
+seq_type = 'pe'
+
+if seq_type == "pe":
+    single_regex = '[^\/\s.-]+-\d+-R[12]'
+    DATA['single'] = (DATA[['group', 'rep', 'read']]
+        .apply(lambda x: '-'.join(x), axis = 1))
+    trimmed_out = ['fastq/trimmed/{sample}-R1.trim.fastq.gz',
+                   'fastq/trimmed/{sample}-R2.trim.fastq.gz']
+    cutadapt_cmd = ('cutadapt '
+            '-a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA '
+            '-A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT '
+            '{params.others} --cores {THREADS} '
+            '-o {output.trimmed[0]} -p {output.trimmed[1]} '
+            '{input} > {output.qc} '
+        '2> {log}')
+    hisat2_cmd = ('(hisat2 '
+            '-x {params.index} -p 6 '
+            '-1 {input.reads_in[0]} -2 {input.reads_in[1]} '
+            '--summary-file {output.qc} '
+        '| samtools view -b > {output.bam}) '
+        '2> {log}')
+else:
+    single_regex = '[^\/\s.-]+-\d+'
+    DATA['single'] = (DATA[['group', 'rep']]
+        .apply(lambda x: '-'.join(x), axis = 1))
+    trimmed_out = ['fastq/trimmed/{sample}.trim.fastq.gz']
+    cutadapt_cmd = ('cutadapt '
+            '-a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA '
+            '{params.others} --cores {THREADS} '
+            '-o {output.trimmed[0]} {input} > {output.qc} '
+        '2> {log}')
+    hisat2_cmd = ('(hisat2 '
+            '-x {params.index} -p 6 '
+            '-U {input.reads_in[0]} '
+            '--summary-file {output.qc} '
+        '| samtools view -b > {output.bam}) '
+        '2> {log}')
+
 # Define single and sample names from definitions.
-DATA['single'] = (DATA[['group', 'rep', 'read']]
-    .apply(lambda x: '-'.join(x), axis = 1))
 DATA['sample'] = (DATA[['group', 'rep']]
     .apply(lambda x: '-'.join(x), axis = 1))
 DATA = DATA.set_index(['group', 'sample', 'single'], drop = False)
 
-# Extract groups and replicates.
-GROUPS = {}
-for group in DATA['group']:
-    GROUPS[group] = list(DATA.loc[group]['rep'].unique())
 # Extract sample names
 SAMPLES = list(DATA['sample'].unique())
 # Define READS (R1 and R2)
 READS = ['R1', 'R2']
 
 THREADS = 1
+
+wildcard_constraints:
+    group = '[^\/\s.-]+',
+    sample = '[^\/\s.-]+-\d+',
+    single = single_regex,
+    rep = '\d+',
+    read = 'R[12]'
 
 rule all:
     input:
@@ -117,13 +149,13 @@ rule fastqc:
 # Modify FASTQ filename to match {sample}-{read} for multiQC
 rule modify_fastqc:
     input:
-        'qc/fastqc/unmod/{sample}-{read}.raw.fastqc.zip'
+        'qc/fastqc/unmod/{single}.raw.fastqc.zip'
     output:
-        'qc/fastqc/{sample}-{read}.raw_fastqc.zip'
+        'qc/fastqc/{single}.raw_fastqc.zip'
     params:
-        name = lambda wc: f'{wc.sample}-{wc.read}'
+        name = lambda wc: f'{wc.single}'
     log:
-        'logs/modify_fastqc/{sample}-{read}.raw.log'
+        'logs/modify_fastqc/{single}.raw.log'
     conda:
         f'{ENVS}/coreutils.yaml'
     shell:
@@ -133,14 +165,11 @@ rule cutadapt:
     input:
         lambda wc: DATA.xs(wc.sample, level = 1)['path']
     output:
-        r1 = 'fastq/trimmed/{sample}-R1.trim.fastq.gz',
-        r2 = 'fastq/trimmed/{sample}-R2.trim.fastq.gz',
+        trimmed = trimmed_out,
         qc = 'qc/cutadapt/unmod/{sample}.cutadapt.txt'
     group:
         'cutadapt'
     params:
-        adapters = '-a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA '
-                   '-A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT',
         others = '--minimum-length 20 --quality-cutoff 20 '
                  '--gc-content 46 --overlap 6 --error-rate 0.1'
     log:
@@ -150,10 +179,7 @@ rule cutadapt:
     threads:
         THREADS
     shell:
-        'cutadapt '
-            '{params.adapters} {params.others} --cores {THREADS} '
-            '-o {output.r1} -p {output.r2} {input} > {output.qc} '
-        '2> {log}'
+        cutadapt_cmd
 
 rule modify_cutadapt:
     input:
@@ -172,16 +198,16 @@ rule modify_cutadapt:
 
 rule fastq_screen:
     input:
-        'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
+        'fastq/trimmed/{single}.trim.fastq.gz'
     output:
-        txt = 'qc/fastq_screen/{sample}-{read}.fastq_screen.txt',
-        png = 'qc/fastq_screen/{sample}-{read}.fastq_screen.png'
+        txt = 'qc/fastq_screen/{single}.fastq_screen.txt',
+        png = 'qc/fastq_screen/{single}.fastq_screen.png'
     params:
         fastq_screen_config = FASTQ_SCREEN_CONFIG,
         subset = 100000,
         aligner = 'bowtie2'
     log:
-        'logs/fastq_screen/{sample}-{read}.log'
+        'logs/fastq_screen/{single}.log'
     threads:
         8
     wrapper:
@@ -189,18 +215,18 @@ rule fastq_screen:
 
 rule fastqc_trimmed:
     input:
-        'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
+        'fastq/trimmed/{single}.trim.fastq.gz'
     output:
-        html = 'qc/fastqc/{sample}-{read}.trim_fastqc.html',
-        zip = 'qc/fastqc/{sample}-{read}.trim_fastqc.zip'
+        html = 'qc/fastqc/{single}.trim_fastqc.html',
+        zip = 'qc/fastqc/{single}.trim_fastqc.zip'
     log:
-        'logs/fastqc_trimmed/{sample}-{read}.log'
+        'logs/fastqc_trimmed/{single}.log'
     wrapper:
         '0.49.0/bio/fastqc'
 
 rule STAR_map:
     input:
-        fastq = [rules.cutadapt.output.r1, rules.cutadapt.output.r2],
+        reads_in = trimmed_out,
         idx_dir = rules.STAR_index.output
     output:
         bam = 'mapped/{sample}.sorted.bam',
@@ -215,15 +241,14 @@ rule STAR_map:
         'STAR '
             '--runMode alignReads --runThreadN {threads} '
             '--genomeDir {input.idx_dir} '
-            '--readFilesIn {input.fastq} --readFilesCommand zcat '
+            '--readFilesIn {input.reads_in} --readFilesCommand zcat '
             '--outFileNamePrefix mapped/{wildcards.sample} '
             '--outSAMtype BAM SortedByCoordinate '
         '&> {log}; cp {log} {output.qc}'
 
 rule hisat2_map:
     input:
-        fastq_r1 = rules.cutadapt.output.r1,
-        fastq_r2 = rules.cutadapt.output.r2
+        reads_in = trimmed_out,
     output:
         bam = 'mapped/{sample}.bam',
         qc = 'qc/{sample}.hisat2.txt'
@@ -236,12 +261,7 @@ rule hisat2_map:
     threads:
         12
     shell:
-        '(hisat2 '
-            '-x {params.index} -p 6 '
-            '-1 {input.fastq_r1} -2 {input.fastq_r2} '
-            '--summary-file {output.qc} '
-        '| samtools view -b > {output.bam}) '
-        '2> {log}'
+        hisat2_cmd
 
 rule samtools_sort:
     input:
@@ -416,6 +436,7 @@ rule multiqc:
         expand('qc/cutadapt/{sample}.cutadapt.txt', sample = SAMPLES),
         expand('qc/fastqc/{sample}-{read}.trim_fastqc.zip',
             sample = SAMPLES, read = READS),
+        expand('qc/{sample}.hisat2.txt', sample = SAMPLES),
         #expand('qc/{sample}-STAR.txt', sample = SAMPLES),
         expand('qc/samtools/stats/{sample}.stats.txt', sample = SAMPLES),
         expand('qc/samtools/idxstats/{sample}.idxstats.txt', sample = SAMPLES),
