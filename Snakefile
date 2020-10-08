@@ -1,143 +1,72 @@
+#!/usr/bin/env python3
+
+import os
+import re
+import sys
+import tempfile
 import pandas as pd
+from snake_setup import set_config, load_samples
 
 BASE = workflow.basedir
 
+# Define path to conda environment specifications
 ENVS = f'{BASE}/workflow/envs'
+# Defne path to custom scripts directory
 SCRIPTS = f'{BASE}/workflow/scripts'
 
-configfile : f'{BASE}/config/config.yaml'
-GENOME = config['genome']
-BUILD = config['build']
-FASTQ_SCREEN_CONFIG = config['fastq_screen_config']
-ANNOTATION = config['annotation'] # Must NOT be gzipped
+if not config:
+    configfile: f'{BASE}/config/config.yaml'
 
-try:
-    OVERHANG = config['read_length'] - 1
-except KeyError:
-    OVERHANG = 100 - 1
-try:
-    workdir : config['outdir']
-except KeyError:
-    pass
+# Defaults configuration file - use empty string to represent no default value.
+default_config = {
+    'workdir':           workflow.basedir,
+    'tmpdir':            tempfile.gettempdir(),
+    'threads':           workflow.cores,
+    'data':              ''          ,
+    'paired':            ''          ,
+    'computeMatrixScale':
+        {'exon':         True        ,},
+    'genome':
+        {'build':        'genome'    ,
+         'index':        ''          ,
+         'annotation':   ''          ,
+         'sequence':     ''          ,
+         'genes':        ''          ,
+         'blacklist':    None        ,},
+    'cutadapt':
+        {'forwardAdapter': 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA',
+         'reverseAdapter': 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT',
+         'overlap':         3                                 ,
+         'errorRate':       0.1                               ,
+         'minimumLength':   0                                 ,
+         'qualityCutoff':  '0,0'                              ,
+         'GCcontent':       50                                ,},
+    'fastq_screen':      None        ,
+}
 
-DATA_TABLE = config['data']
-DATA = pd.read_table(config['data'], sep = ',', dtype = {'rep' : str})
+config = set_config(config, default_config)
 
-# Validate read file input with wildcard definitions
-if not DATA['group'].str.match(r'[^\/\s.-]+').all():
-    sys.exit(f'Invalid group definition in {DATA_TABLE}.')
-if not DATA['rep'].str.match(r'\d+').all():
-    sys.exit(f'Invalid replicate definition in {DATA_TABLE}.')
-if not DATA['read'].str.match(r'R[12]').all():
-    sys.exit(f'Invalid read definition in {DATA_TABLE}.')
+workdir: config['workdir']
+BUILD = config['genome']['build']
 
-seq_type = 'pe'
-
-if seq_type == "pe":
-    single_regex = '[^\/\s.-]+-\d+-R[12]'
-    DATA['single'] = (DATA[['group', 'rep', 'read']]
-        .apply(lambda x: '-'.join(x), axis = 1))
-    trimmed_out = ['fastq/trimmed/{sample}-R1.trim.fastq.gz',
-                   'fastq/trimmed/{sample}-R2.trim.fastq.gz']
-    cutadapt_cmd = ('cutadapt '
-            '-a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA '
-            '-A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT '
-            '{params.others} --cores {THREADS} '
-            '-o {output.trimmed[0]} -p {output.trimmed[1]} '
-            '{input} > {output.qc} '
-        '2> {log}')
-    hisat2_cmd = ('(hisat2 '
-            '-x {params.index} -p 6 '
-            '-1 {input.reads_in[0]} -2 {input.reads_in[1]} '
-            '--summary-file {output.qc} '
-        '| samtools view -b > {output.bam}) '
-        '2> {log}')
-else:
-    single_regex = '[^\/\s.-]+-\d+'
-    DATA['single'] = (DATA[['group', 'rep']]
-        .apply(lambda x: '-'.join(x), axis = 1))
-    trimmed_out = ['fastq/trimmed/{sample}.trim.fastq.gz']
-    cutadapt_cmd = ('cutadapt '
-            '-a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA '
-            '{params.others} --cores {THREADS} '
-            '-o {output.trimmed[0]} {input} > {output.qc} '
-        '2> {log}')
-    hisat2_cmd = ('(hisat2 '
-            '-x {params.index} -p 6 '
-            '-U {input.reads_in[0]} '
-            '--summary-file {output.qc} '
-        '| samtools view -b > {output.bam}) '
-        '2> {log}')
-
-# Define single and sample names from definitions.
-DATA['sample'] = (DATA[['group', 'rep']]
-    .apply(lambda x: '-'.join(x), axis = 1))
-DATA = DATA.set_index(['group', 'sample', 'single'], drop = False)
+# Read path to samples in pandas
+samples = load_samples(config['data'], config['paired'])
 
 # Extract sample names
-SAMPLES = list(DATA['sample'].unique())
-# Define READS (R1 and R2)
-READS = ['R1', 'R2']
-
-THREADS = 1
+SAMPLES = list(samples['sample'].unique())
 
 wildcard_constraints:
-    group = '[^\/\s.-]+',
-    sample = '[^\/\s.-]+-\d+',
-    single = single_regex,
-    rep = '\d+',
-    read = 'R[12]'
+    single = '|'.join(samples['single']),
+    sample = '|'.join(samples['sample']),
+    rep = '|'.join(samples['rep'].unique())
 
 rule all:
     input:
-        ['qc/multiqc', 'qc/multibamqc', f'genome/{BUILD}.fa.gz.fai']
-
-rule bgzip_genome:
-    input:
-        GENOME
-    output:
-        f'genome/{BUILD}.fa.gz'
-    log:
-        f'logs/bgzip_genome/{BUILD}.log'
-    conda:
-        f'{ENVS}/tabix.yaml'
-    shell:
-        '(zcat -f {input} | bgzip --stdout > {output}) 2> {log}'
-
-rule faidx:
-    input:
-        rules.bgzip_genome.output
-    output:
-         multiext(f'{rules.bgzip_genome.output}', '.fai', '.gzi')
-    log:
-        'logs/index_genome/index_genome.log'
-    conda:
-        f'{ENVS}/samtools.yaml'
-    shell:
-        'samtools faidx {input} &> {log}'
-
-rule STAR_index:
-    input:
-        genome = rules.bgzip_genome.output,
-        gtf = ANNOTATION
-    output:
-        directory('genome/idx')
-    log:
-        'logs/build_STAR_index/STAR_index.log'
-    conda:
-        f'{ENVS}/STAR.yaml'
-    threads:
-        THREADS
-    shell:
-        'STAR '
-            '--runMode genomeGenerate --runThreadN {threads} '
-            '--genomeDir {output} --genomeFastaFiles {input.genome} '
-            '--sjdbOverhang {OVERHANG} --sjdbGTFfile {input.gtf} '
-        '&> {log}'
+        ['qc/multiqc']
 
 rule fastqc:
     input:
-        lambda wc: DATA.xs(wc.single, level = 2)['path']
+        lambda wc: samples.xs(wc.single, level = 2)['path']
     output:
         html = 'qc/fastqc/{single}.raw_fastqc.html',
         zip = 'qc/fastqc/unmod/{single}.raw.fastqc.zip'
@@ -146,8 +75,8 @@ rule fastqc:
     wrapper:
         '0.49.0/bio/fastqc'
 
-# Modify FASTQ filename to match {sample}-{read} for multiQC
-rule modify_fastqc:
+
+rule modifyFastQC:
     input:
         'qc/fastqc/unmod/{single}.raw.fastqc.zip'
     output:
@@ -155,33 +84,61 @@ rule modify_fastqc:
     params:
         name = lambda wc: f'{wc.single}'
     log:
-        'logs/modify_fastqc/{single}.raw.log'
+        'logs/modifyFastQC/{single}.raw.log'
     conda:
-        f'{ENVS}/coreutils.yaml'
+        f'{ENVS}/python3.yaml'
     shell:
-        '{SCRIPTS}/modify_fastqc.sh {input} {output} {params.name} &> {log}'
+        '{SCRIPTS}/modifyFastQC.py {input} {output} {params.name} &> {log}'
+
+
+def cutadaptOutput():
+    if config['paired']:
+        return ['fastq/trimmed/{sample}-R1.trim.fastq.gz',
+                'fastq/trimmed/{sample}-R2.trim.fastq.gz']
+    else:
+        return ['fastq/trimmed/{sample}.trim.fastq.gz']
+
+
+def cutadaptCmd():
+    if config['paired']:
+        cmd = ('cutadapt -a {params.forwardAdapter} -A {params.reverseAdapter} '
+            '-o {output.trimmed[0]} -p {output.trimmed[1]} ')
+    else:
+        cmd = 'cutadapt -a {params.forwardAdapter} -o {output.trimmed[0]} '
+
+    cmd += ('--overlap {params.overlap} --error-rate {params.errorRate} '
+        '--minimum-length {params.minimumLength} '
+        '--quality-cutoff {params.qualityCutoff} '
+        '--gc-content {params.GCcontent} '
+        '--cores {threads} {input} > {output.qc} 2> {log}')
+    return cmd
+
 
 rule cutadapt:
     input:
-        lambda wc: DATA.xs(wc.sample, level = 1)['path']
+        lambda wc: samples.xs(wc.sample, level=1)['path']
     output:
-        trimmed = trimmed_out,
+        trimmed = cutadaptOutput(),
         qc = 'qc/cutadapt/unmod/{sample}.cutadapt.txt'
-    group:
-        'cutadapt'
     params:
-        others = '--minimum-length 20 --quality-cutoff 20 '
-                 '--gc-content 46 --overlap 6 --error-rate 0.1'
+        forwardAdapter = config['cutadapt']['forwardAdapter'],
+        reverseAdapter = config['cutadapt']['reverseAdapter'],
+        overlap = config['cutadapt']['overlap'],
+        errorRate = config['cutadapt']['errorRate'],
+        minimumLength = config['cutadapt']['minimumLength'],
+        qualityCutoff = config['cutadapt']['qualityCutoff'],
+        GCcontent = config['cutadapt']['GCcontent']
     log:
         'logs/cutadapt/{sample}.log'
     conda:
         f'{ENVS}/cutadapt.yaml'
     threads:
-        THREADS
+        config['threads']
     shell:
-        cutadapt_cmd
+        cutadaptCmd()
 
-rule modify_cutadapt:
+
+rule modifyCutadapt:
     input:
         rules.cutadapt.output.qc
     output:
@@ -189,31 +146,32 @@ rule modify_cutadapt:
     group:
         'cutadapt'
     log:
-        'logs/modify_cutadapt/{sample}.log'
+        'logs/modifyCutadapt/{sample}.log'
     conda:
-        f'{ENVS}/coreutils.yaml'
+        f'{ENVS}/python3.yaml'
     shell:
-        'awk -v sample={wildcards.sample} '
-            '-f {SCRIPTS}/modify_cutadapt.awk {input} > {output} 2> {log}'
+        '{SCRIPTS}/modifyCutadapt.py {wildcards.sample} {input} '
+        '> {output} 2> {log}'
 
-rule fastq_screen:
+rule fastqScreen:
     input:
         'fastq/trimmed/{single}.trim.fastq.gz'
     output:
         txt = 'qc/fastq_screen/{single}.fastq_screen.txt',
         png = 'qc/fastq_screen/{single}.fastq_screen.png'
     params:
-        fastq_screen_config = FASTQ_SCREEN_CONFIG,
+        fastq_screen_config = config['fastq_screen'],
         subset = 100000,
         aligner = 'bowtie2'
     log:
         'logs/fastq_screen/{single}.log'
     threads:
-        8
+        config['threads']
     wrapper:
-        "0.49.0/bio/fastq_screen"
+        '0.49.0/bio/fastq_screen'
 
-rule fastqc_trimmed:
+
+rule fastQCtrimmed:
     input:
         'fastq/trimmed/{single}.trim.fastq.gz'
     output:
@@ -224,83 +182,102 @@ rule fastqc_trimmed:
     wrapper:
         '0.49.0/bio/fastqc'
 
-rule STAR_map:
-    input:
-        reads_in = trimmed_out,
-        idx_dir = rules.STAR_index.output
-    output:
-        bam = 'mapped/{sample}.sorted.bam',
-        qc = 'qc/{sample}.STAR.txt'
-    log:
-        'logs/STAR_map/{sample}.log'
-    conda:
-        f'{ENVS}/STAR.yaml'
-    threads:
-        THREADS
-    shell:
-        'STAR '
-            '--runMode alignReads --runThreadN {threads} '
-            '--genomeDir {input.idx_dir} '
-            '--readFilesIn {input.reads_in} --readFilesCommand zcat '
-            '--outFileNamePrefix mapped/{wildcards.sample} '
-            '--outSAMtype BAM SortedByCoordinate '
-        '&> {log}; cp {log} {output.qc}'
 
-rule hisat2_map:
+def hisat2Cmd():
+    if config['paired']:
+        return ('hisat2 -x {params.index} -1 {input.reads[0]} '
+            '-2 {input.reads[1]} --threads {threads} '
+            '--summary-file {output.qc} > {output.sam} 2> {log}')
+    else:
+        return ('hisat2 -x {params.index} -p {threads} '
+            '-U {input.reads[0]} > {output.sam} 2> {log}')
+
+
+rule hisat2:
     input:
-        reads_in = trimmed_out,
+        reads = rules.cutadapt.output.trimmed
     output:
-        bam = 'mapped/{sample}.bam',
+        sam = 'mapped/{sample}.sam',
         qc = 'qc/{sample}.hisat2.txt'
     params:
-        index = '/media/stephen/Data/genomes/GRCm38/index/GRCm38'
+        index = config['genome']['index']
     log:
-        'logs/hisat2_map/{sample}.log'
+        'logs/hisat2/{sample}.log'
     conda:
         f'{ENVS}/hisat2.yaml'
     threads:
-        12
+        config['threads']
     shell:
-        hisat2_cmd
+        hisat2Cmd()
 
-rule samtools_sort:
+
+rule fixBAM:
     input:
-        rules.hisat2_map.output.bam
+        rules.hisat2.output.sam
     output:
-        'mapped/{sample}.sort.bam',
+        pipe('mapped/{sample}.fixmate.bam')
     log:
-        'logs/samtools_sort/{sample}.log'
+        'logs/fixBAM/{sample}.log'
+    conda:
+        f'{ENVS}/samtools.yaml'
+    shell:
+        'samtools fixmate -O bam,level=0 -m {input} {output} &> {log}'
+
+
+rule sortBAM:
+    input:
+        rules.fixBAM.output
+    output:
+        'mapped/{sample}.sort.bam'
+    log:
+        'logs/sortBAM/{sample}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     threads:
-        12
+        min(1, (config['threads'] / 2) - 1,)
     shell:
-        'samtools sort -@ 6 {input} > {output} 2> {log}'
+        'samtools sort -@ {threads} {input} > {output} 2> {log}'
 
-rule index_bam:
+
+rule markdupBAM:
     input:
-        rules.samtools_sort.output
-        #rules.STAR_map.output.bam
+        rules.sortBAM.output
     output:
-        f'{rules.samtools_sort.output}.bai'
-        #f'{rules.STAR_map.output.bam}.bai'
+        bam = 'mapped/{sample}.markdup.bam',
+        qc = 'qc/deduplicate/{sample}.txt'
     log:
-        'logs/index_bam/{sample}.log'
+        'logs/markdupBAM/{sample}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     threads:
-        12
+        config['threads']
     shell:
-        'samtools index -@ 6 {input} &> {log}'
+        'samtools markdup -@ {threads} '
+        '-s -f {output.qc} {input} {output.bam} &> {log}'
 
-rule samtools_stats:
+
+rule indexBAM:
     input:
-        rules.samtools_sort.output
-        #rules.STAR_map.output.bam
+        'mapped/{sample}.{stage}.bam'
+    output:
+        'mapped/{sample}.{stage}.bam.bai'
+    log:
+        'logs/indexBAM/{sample}-{stage}.log'
+    conda:
+        f'{ENVS}/samtools.yaml'
+    threads:
+        min(1, (config['threads'] / 2) - 1,)
+    shell:
+        'samtools index -@ {threads} {input} &> {log}'
+
+
+rule samtoolsStats:
+    input:
+        rules.markdupBAM.output.bam
     output:
         'qc/samtools/stats/{sample}.stats.txt'
     group:
-        'SAM_QC'
+        'samQC'
     log:
         'logs/samtools_stats/{sample}.log'
     conda:
@@ -308,15 +285,15 @@ rule samtools_stats:
     shell:
         'samtools stats {input} > {output} 2> {log}'
 
-rule samtools_idxstats:
+
+rule samtoolsIdxstats:
     input:
-        bam = rules.samtools_sort.output,
-        #bam = rules.STAR_map.output.bam,
-        index = rules.index_bam.output
+        bam = 'mapped/{sample}.markdup.bam',
+        index = 'mapped/{sample}.markdup.bam.bai'
     output:
         'qc/samtools/idxstats/{sample}.idxstats.txt'
     group:
-        'SAM_QC'
+        'samQC'
     log:
         'logs/samtools_idxstats/{sample}.log'
     conda:
@@ -324,95 +301,354 @@ rule samtools_idxstats:
     shell:
         'samtools idxstats {input.bam} > {output} 2> {log}'
 
-rule samtools_flagstat:
+rule samtoolsFlagstat:
     input:
-        rules.samtools_sort.output
-        #rules.STAR_map.output.bam
+        rules.markdupBAM.output.bam
     output:
         'qc/samtools/flagstat/{sample}.flagstat.txt'
     group:
-        'SAM_QC'
+        'samQC'
     log:
-        'logs/samtools_flagstat/{sample}.log'
+        'logs/samtoolsFlagstat/{sample}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     shell:
         'samtools flagstat {input} > {output} 2> {log}'
 
-rule bamqc:
+
+def setBlacklistCommand():
+    if config['genome']['blacklist']:
+        cmd = ('bedtools merge -d {params.distance} -i {input} ' \
+            '> {output} 2> {log}')
+    else:
+        cmd = 'touch {output} &> {log}'
+    return cmd
+
+
+rule processBlacklist:
     input:
-        bam = rules.samtools_sort.output,
-        #bam = rules.STAR_map.output.bam,
-        gtf = ANNOTATION
+        config['genome']['blacklist'] if config['genome']['blacklist'] else []
     output:
-        directory('qc/bamqc/{sample}')
-    resources:
-        mem_mb = 3000
+        f'genome/{BUILD}-blacklist.bed'
+    params:
+        # Max distance between features allowed for features to be merged.
+        distance = 1000
     log:
-        'logs/bamqc/{sample}.log'
+        f'logs/processBlacklist/{BUILD}.log'
     conda:
-        f'{ENVS}/qualimap.yaml'
+        f'{ENVS}/bedtools.yaml'
+    shell:
+        setBlacklistCommand()
+
+
+rule estimateReadFiltering:
+    input:
+        bam = rules.markdupBAM.output.bam,
+        index = 'mapped/{sample}.markdup.bam.bai',
+        blacklist = rules.processBlacklist.output
+    output:
+        'qc/deeptools/estimateReadFiltering/{sample}.txt'
+    params:
+        minMapQ = 15,
+        binSize = 10000,
+        distanceBetweenBins = 0,
+        properPair = '--samFlagInclude 2' if config['paired'] else '',
+    log:
+        'logs/estimateReadFiltering/{sample}.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
     threads:
-        12
+        config['threads']
     shell:
-        'qualimap bamqc '
-            '-bam {input.bam} -gff {input.gtf} -outdir {output} '
-            '-nt 6 --outside-stats --java-mem-size={resources.mem_mb}M '
-            '--paint-chromosome-limits '
-        '&> {log}'
+        'estimateReadFiltering --bamfiles {input.bam} --outFile {output} '
+        '--binSize {params.binSize} --blackListFileName {input.blacklist} '
+        '--distanceBetweenBins {params.distanceBetweenBins} '
+        '--minMappingQuality {params.minMapQ} --ignoreDuplicates '
+        '--samFlagExclude 260 {params.properPair} '
+        '--numberOfProcessors {threads} &> {log}'
 
-rule rnaqc:
+
+rule alignmentSieve:
     input:
-        bam = rules.samtools_sort.output,
-        #rules.STAR_map.output.bam,
-        gtf = ANNOTATION
+        bam = rules.markdupBAM.output.bam,
+        index = 'mapped/{sample}.markdup.bam.bai',
+        blacklist = rules.processBlacklist.output
     output:
-        directory('qc/rnaqc/{sample}')
-    resources:
-        mem_mb = 3000
+        bam = 'mapped/{sample}.filtered.bam',
+        qc = 'qc/deeptools/{sample}-filter-metrics.txt'
+    params:
+        minMapQ = 15,
+        maxFragmentLength = 2000,
+        properPair = '--samFlagInclude 2' if config['paired'] else '',
     log:
-        'logs/rnaqc/{sample}.log'
+        'logs/alignmentSieve/{sample}.log'
     conda:
-        f'{ENVS}/qualimap.yaml'
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
     shell:
-        'qualimap rnaseq '
-            '-bam {input.bam} -gtf {input.gtf} -outdir {output} '
-            '--java-mem-size={resources.mem_mb}M '
-        '&> {log}'
+        'alignmentSieve --bam {input.bam} --outFile {output.bam} '
+        '--minMappingQuality {params.minMapQ} --ignoreDuplicates '
+        '--samFlagExclude 260 {params.properPair} '
+        '--maxFragmentLength {params.maxFragmentLength} '
+        '--blackListFileName {input.blacklist} '
+        '--numberOfProcessors {threads} --filterMetrics {output.qc} &> {log}'
 
-rule multibamqc_config:
-    input:
-        expand('qc/bamqc/{sample}', sample = SAMPLES)
-    output:
-        'qc/bamqc/multibamqc.config'
-    group:
-        'multiBAM_QC'
-    log:
-        'logs/multibamqc_config/multibamqc_config.log'
-    shell:
-        '{SCRIPTS}/multibamqc_config.py {input} > {output} 2> {log}'
 
-rule multibamqc:
+rule multiBamSummary:
     input:
-        rules.multibamqc_config.output
+        bams = expand('mapped/{sample}.filtered.bam', sample=SAMPLES),
+        indexes = expand('mapped/{sample}.filtered.bam.bai', sample=SAMPLES)
     output:
-        directory('qc/multibamqc')
-    group:
-        'multiBAM_QC'
+        'qc/deeptools/multiBamSummary.npz'
+    params:
+        binSize = 10000,
+        distanceBetweenBins = 0,
+        labels = ' '.join(SAMPLES),
+        extendReads = 150
     log:
-        'logs/multibamqc/multibamqc.log'
+        'logs/multiBamSummary.log'
     conda:
-        f'{ENVS}/qualimap.yaml'
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
     shell:
-        'qualimap multi-bamqc '
-            '--data {input} -outdir {output} '
-        '&> {log}'
+        'multiBamSummary bins --bamfiles {input.bams} --outFileName {output} '
+        '--binSize {params.binSize} --labels {params.labels} '
+        '--distanceBetweenBins {params.distanceBetweenBins} '
+        '--extendReads {params.extendReads} --numberOfProcessors {threads} &> {log}'
+
+
+rule plotCorrelation:
+    input:
+        rules.multiBamSummary.output
+    output:
+        plot = 'qc/deeptools/plotCorrelation.png',
+        matrix = 'qc/deeptools/plotCorrelation.tsv'
+    params:
+        corMethod = 'pearson',
+        colorMap = 'viridis',
+        labels = ' '.join(SAMPLES)
+    log:
+        'logs/plotCorrelation.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    shell:
+        'plotCorrelation --corData {input} --corMethod {params.corMethod} '
+        '--whatToPlot heatmap --labels {params.labels} --skipZeros '
+        '--colorMap {params.colorMap} --plotNumbers '
+        '--plotFile {output.plot} --outFileCorMatrix {output.matrix} &> {log}'
+
+
+def setColours(samples):
+    """ Find group and assign to specific colour. """
+    colours = ''
+    colourPool = ['#E69F00', '#56B4E9', '#009E73', '#F0E442',
+                  '#0072B2', '#D55E00', '#CC79A7']
+    # Add double quotes for compatibility with shell
+    colourPool = [f'"{colour}"' for colour in colourPool]
+    usedColours = {}
+    for sample in samples:
+        group = sample.split('-')[0]
+        if group not in usedColours:
+            usedColours[group] = colourPool[0]
+            # Remove from pool
+            colourPool = colourPool[1:]
+        colours += f'{usedColours[group]} '
+    return f'{colours}'
+
+
+rule plotPCA:
+    input:
+        rules.multiBamSummary.output
+    output:
+        plot = 'qc/deeptools/plotPCA.png',
+        data = 'qc/deeptools/plotPCA.tab'
+    params:
+        labels = ' '.join(SAMPLES),
+        colours = setColours(SAMPLES)
+    log:
+        'logs/plotPCA.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    shell:
+        'plotPCA --corData {input} --colors {params.colours} '
+        '--labels {params.labels} --plotFile {output.plot} '
+        '--outFileNameData {output.data} &> {log}'
+
+
+rule plotCoverage:
+    input:
+        bams = expand('mapped/{sample}.filtered.bam', sample=SAMPLES),
+        indexes = expand('mapped/{sample}.filtered.bam.bai', sample=SAMPLES)
+    output:
+        plot = 'qc/deeptools/plotCoverage.png',
+        data = 'qc/deeptools/plotCoverage.tab',
+        info = 'qc/deeptools/plotCoverage.info'
+    params:
+        nSamples = 1000000,
+        labels = ' '.join(SAMPLES)
+    log:
+        'logs/plotCoverage.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
+    shell:
+        'plotCoverage --bamfiles {input.bams} --labels {params.labels} '
+        '--plotFile {output.plot} --outRawCounts {output.data} '
+        '--numberOfSamples {params.nSamples} --numberOfProcessors {threads} '
+        '> {output.info} 2> {log}'
+
+
+rule bamCoverage:
+    input:
+        rules.alignmentSieve.output.bam
+    output:
+        'bigwig/{sample}.filtered.bigwig'
+    params:
+        binSize = 50,
+    log:
+        'logs/bamCoverage/{sample}.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
+    shell:
+        'bamCoverage --bam {input} --outFileName {output} '
+        '--binSize {params.binSize} --numberOfProcessors {threads} &> {log}'
+
+
+rule computeMatrixScaledGroups:
+    input:
+        expand('bigwig/{sample}.filtered.bigwig', sample=SAMPLES)
+    output:
+        scaledGZ = 'deeptools/computeMatrixGroups/matrix-scaled.gz',
+        scaled = 'deeptools/computeMatrixGroups/matrix-scaled.tab',
+        sortedRegions = 'deeptools/computeMatrixGroups/genes-scaled.bed'
+    params:
+        binSize = 50,
+        regionBodyLength = 5000,
+        upstream = 2000,
+        downstream = 2000,
+        metagene = '--metagene' if config['computeMatrixScale']['exon'] else '',
+        samplesLabel = ' '.join(SAMPLES),
+        genes = config['genome']['genes'],
+        averageType = 'mean'
+    log:
+        'logs/computeMatrixScaledGroups.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
+    shell:
+        'computeMatrix scale-regions --scoreFileName {input} '
+        '--regionsFileName {params.genes} --outFileName {output.scaledGZ} '
+        '--outFileNameMatrix {output.scaled} --skipZeros '
+        '--regionBodyLength {params.regionBodyLength} '
+        '--samplesLabel {params.samplesLabel} --binSize {params.binSize} '
+        '--averageTypeBins {params.averageType} {params.metagene} '
+        '--upstream {params.upstream} --downstream {params.downstream} '
+        '--outFileSortedRegions {output.sortedRegions} '
+        '--numberOfProcessors {threads} &> {log}'
+
+
+rule computeMatrixReferenceGroups:
+    input:
+        expand('bigwig/{sample}.filtered.bigwig', sample=SAMPLES)
+    output:
+        referenceGZ = 'deeptools/computeMatrixGroups/matrix-reference.gz',
+        reference = 'deeptools/computeMatrixGroups/matrix-reference.tab',
+        sortedRegions = 'deeptools/computeMatrixGroups/genes-reference.bed'
+    params:
+        binSize = 50,
+        upstream = 5000,
+        downstream = 5000,
+        samplesLabel = ' '.join(SAMPLES),
+        genes = config['genome']['genes'],
+        averageType = 'mean',
+        referencePoint = 'TSS'
+    log:
+        'logs/computeMatrixReferenceGroups.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
+    shell:
+        'computeMatrix reference-point --scoreFileName {input} '
+        '--regionsFileName {params.genes} --outFileName {output.referenceGZ} '
+        '--outFileNameMatrix {output.reference} --skipZeros '
+        '--samplesLabel {params.samplesLabel} --binSize {params.binSize} '
+        '--averageTypeBins {params.averageType} '
+        '--referencePoint {params.referencePoint} '
+        '--upstream {params.upstream} --downstream {params.downstream} '
+        '--outFileSortedRegions {output.sortedRegions} '
+        '--numberOfProcessors {threads} &> {log}'
+
+
+rule plotProfileGroups:
+    input:
+        'deeptools/computeMatrixGroups/matrix-{mode}.gz'
+    output:
+        plot = 'qc/deeptools/compareGroup/plotProfileGroup-{mode}.png',
+        data = 'qc/deeptools/compareGroup/plotProfileGroup-data-{mode}.tab',
+        bed = 'qc/deeptools/compareGroup/plotProfileGroup-regions-{mode}.bed'
+    params:
+        dpi = 300,
+        plotsPerRow = 2,
+        averageType = 'mean',
+        referencePoint = 'TSS'
+    log:
+        'logs/plotProfileGroups-{mode}.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    shell:
+        'plotProfile --matrixFile {input} --outFileName {output.plot} '
+        '--outFileSortedRegions {output.bed} --outFileNameData {output.data} '
+        '--dpi {params.dpi} --averageType {params.averageType} '
+        '--refPointLabel {params.referencePoint} '
+        '--numPlotsPerRow {params.plotsPerRow} &> {log}'
+
+
+rule plotHeatmapGroups:
+    input:
+        'deeptools/computeMatrixGroups/matrix-{mode}.gz'
+    output:
+        plot = 'qc/deeptools/compareGroup/plotHeatmapGroup-{mode}.png',
+        data = 'qc/deeptools/compareGroup/plotHeatmapGroup-data-{mode}.tab',
+        bed = 'qc/deeptools/compareGroup/plotHeatmapGroup-regions-{mode}.bed'
+    params:
+        dpi = 300,
+        zMax = 3,
+        zMin = -3,
+        kmeans = 3,
+        width = max(4, len(SAMPLES) * 2),
+        colorMap = 'RdBu_r',
+        averageType = 'mean',
+        referencePoint = 'TSS',
+        interpolationMethod = 'auto'
+    log:
+        'logs/plotHeatmapGroups-{mode}.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
+    shell:
+        'plotHeatmap --matrixFile {input} --outFileName {output.plot} '
+        '--outFileSortedRegions {output.bed} --outFileNameMatrix {output.data} '
+        '--interpolationMethod {params.interpolationMethod} '
+        '--dpi {params.dpi} --kmeans {params.kmeans} '
+        '--zMin {params.zMin} --zMax {params.zMax} '
+        '--colorMap {params.colorMap} --refPointLabel {params.referencePoint} '
+        '--averageTypeSummaryPlot {params.averageType} '
+        '--heatmapWidth {params.width} '
+        '--refPointLabel {params.referencePoint} &> {log}'
+
 
 rule featureCounts:
     input:
-        bam = rules.samtools_sort.output,
-        #bam = rules.STAR_map.output.bam,
-        gtf = ANNOTATION
+        bam = rules.sortBAM.output,
+        gtf = config['genome']['annotation']
     output:
         counts = 'counts/{sample}.featureCounts.txt',
         qc = 'qc/featurecounts/{sample}.featureCounts.txt.summary'
@@ -421,31 +657,37 @@ rule featureCounts:
     conda:
         f'{ENVS}/subread.yaml'
     shell:
-        '(featureCounts '
-            '--primary -C -t exon -g gene_id '
-            '-a {input.gtf} -o {output.counts} {input.bam} '
-        '&& mv {output.counts}.summary {output.qc}) '
-        '&> {log}'
+        '(featureCounts --primary -C -t exon -g gene_id '
+        '-a {input.gtf} -o {output.counts} {input.bam} '
+        '&& mv {output.counts}.summary {output.qc}) &> {log}'
 
-rule multiqc:
+rule multiQC:
     input:
-        expand('qc/fastqc/{sample}-{read}.raw_fastqc.zip',
-            sample = SAMPLES, read = READS),
-        expand('qc/fastq_screen/{sample}-{read}.fastq_screen.txt',
-            sample = SAMPLES, read = READS),
-        expand('qc/cutadapt/{sample}.cutadapt.txt', sample = SAMPLES),
-        expand('qc/fastqc/{sample}-{read}.trim_fastqc.zip',
-            sample = SAMPLES, read = READS),
-        expand('qc/{sample}.hisat2.txt', sample = SAMPLES),
-        #expand('qc/{sample}-STAR.txt', sample = SAMPLES),
-        expand('qc/samtools/stats/{sample}.stats.txt', sample = SAMPLES),
-        expand('qc/samtools/idxstats/{sample}.idxstats.txt', sample = SAMPLES),
-        expand('qc/samtools/flagstat/{sample}.flagstat.txt', sample = SAMPLES),
-        expand('qc/bamqc/{sample}', sample = SAMPLES),
-        expand('qc/rnaqc/{sample}', sample = SAMPLES),
-        expand('qc/rnaqc/{sample}', sample = SAMPLES),
+        expand('qc/fastqc/{single}.raw_fastqc.zip',
+            single=samples['single']),
+        expand('qc/fastq_screen/{single}.fastq_screen.txt',
+            single=samples['single']),
+        expand('qc/cutadapt/{sample}.cutadapt.txt',
+            sample=SAMPLES),
+        expand('qc/fastqc/{single}.trim_fastqc.zip',
+            single=samples['single']),
+        expand('qc/{sample}.hisat2.txt',
+            sample=SAMPLES),
+        #expand('qc/deeptools/estimateReadFiltering/{sample}.txt',
+        #    sample=SAMPLES),
+        'qc/deeptools/plotCorrelation.tsv',
+        'qc/deeptools/plotPCA.tab',
+        'qc/deeptools/plotCoverage.info',
+        'qc/deeptools/plotCoverage.tab',
+        'qc/deeptools/compareGroup/plotProfileGroup-data-scaled.tab',
+        expand('qc/samtools/stats/{sample}.stats.txt',
+            sample=SAMPLES),
+        expand('qc/samtools/idxstats/{sample}.idxstats.txt',
+            sample=SAMPLES),
+        expand('qc/samtools/flagstat/{sample}.flagstat.txt',
+            sample=SAMPLES),
         expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
-            sample = SAMPLES)
+            sample=SAMPLES)
     output:
         directory('qc/multiqc')
     log:
@@ -454,5 +696,5 @@ rule multiqc:
         f'{ENVS}/multiqc.yaml'
     shell:
         'multiqc --outdir {output} '
-            '--force --config {BASE}/config/multiqc_config.yaml {input} '
+        '--force --config {BASE}/config/multiqc_config.yaml {input} '
         '&> {log}'
