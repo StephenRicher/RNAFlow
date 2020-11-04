@@ -41,7 +41,7 @@ default_config = {
          'minimumLength':   0                                 ,
          'qualityCutoff':  '0,0'                              ,
          'GCcontent':       50                                ,},
-    'fastq_screen':      None        ,
+    'fastq_screen':         None                              ,
 }
 
 config = set_config(config, default_config)
@@ -50,7 +50,7 @@ workdir: config['workdir']
 BUILD = config['genome']['build']
 
 # Read path to samples in pandas
-samples = load_samples(config['data'], config['paired'])
+samples = load_samples(config['data'])
 
 # Extract sample names
 SAMPLES = list(samples['sample'].unique())
@@ -96,7 +96,7 @@ def cutadaptOutput():
         return ['fastq/trimmed/{sample}-R1.trim.fastq.gz',
                 'fastq/trimmed/{sample}-R2.trim.fastq.gz']
     else:
-        return ['fastq/trimmed/{sample}.trim.fastq.gz']
+        return ['fastq/trimmed/{sample}-R1.trim.fastq.gz']
 
 
 def cutadaptCmd():
@@ -153,22 +153,23 @@ rule modifyCutadapt:
         '{SCRIPTS}/modifyCutadapt.py {wildcards.sample} {input} '
         '> {output} 2> {log}'
 
-rule fastqScreen:
-    input:
-        'fastq/trimmed/{single}.trim.fastq.gz'
-    output:
-        txt = 'qc/fastq_screen/{single}.fastq_screen.txt',
-        png = 'qc/fastq_screen/{single}.fastq_screen.png'
-    params:
-        fastq_screen_config = config['fastq_screen'],
-        subset = 100000,
-        aligner = 'bowtie2'
-    log:
-        'logs/fastq_screen/{single}.log'
-    threads:
-        config['threads']
-    wrapper:
-        '0.49.0/bio/fastq_screen'
+if config['fastq_screen']:
+    rule fastqScreen:
+        input:
+            'fastq/trimmed/{single}.trim.fastq.gz'
+        output:
+            txt = 'qc/fastq_screen/{single}.fastq_screen.txt',
+            png = 'qc/fastq_screen/{single}.fastq_screen.png'
+        params:
+            fastq_screen_config = config['fastq_screen'],
+            subset = 100000,
+            aligner = 'bowtie2'
+        log:
+            'logs/fastq_screen/{single}.log'
+        threads:
+            config['threads']
+        wrapper:
+            '0.49.0/bio/fastq_screen'
 
 
 rule fastQCtrimmed:
@@ -190,15 +191,16 @@ def hisat2Cmd():
             '--summary-file {output.qc} > {output.sam} 2> {log}')
     else:
         return ('hisat2 -x {params.index} -p {threads} '
-            '-U {input.reads[0]} > {output.sam} 2> {log}')
+            '-U {input.reads[0]} --summary-file {output.qc} '
+            '> {output.sam} 2> {log}')
 
 
 rule hisat2:
     input:
         reads = rules.cutadapt.output.trimmed
     output:
-        sam = 'mapped/{sample}.sam',
-        qc = 'qc/{sample}.hisat2.txt'
+        sam = pipe('mapped/{sample}.sam'),
+        qc = 'qc/hisat2/{sample}.hisat2.txt'
     params:
         index = config['genome']['index']
     log:
@@ -206,7 +208,7 @@ rule hisat2:
     conda:
         f'{ENVS}/hisat2.yaml'
     threads:
-        config['threads']
+        max(1, (config['threads'] / 2) - 1)
     shell:
         hisat2Cmd()
 
@@ -234,7 +236,7 @@ rule sortBAM:
     conda:
         f'{ENVS}/samtools.yaml'
     threads:
-        min(1, (config['threads'] / 2) - 1,)
+        max(1, (config['threads'] / 2) - 1)
     shell:
         'samtools sort -@ {threads} {input} > {output} 2> {log}'
 
@@ -253,7 +255,7 @@ rule markdupBAM:
         config['threads']
     shell:
         'samtools markdup -@ {threads} '
-        '-s -f {output.qc} {input} {output.bam} &> {log}'
+        '-sf {output.qc} {input} {output.bam} &> {log}'
 
 
 rule indexBAM:
@@ -301,6 +303,7 @@ rule samtoolsIdxstats:
     shell:
         'samtools idxstats {input.bam} > {output} 2> {log}'
 
+
 rule samtoolsFlagstat:
     input:
         rules.markdupBAM.output.bam
@@ -318,8 +321,8 @@ rule samtoolsFlagstat:
 
 def setBlacklistCommand():
     if config['genome']['blacklist']:
-        cmd = ('bedtools merge -d {params.distance} -i {input} ' \
-            '> {output} 2> {log}')
+        cmd = ('bedtools merge -d {params.distance} -i {input} '
+               '> {output} 2> {log}')
     else:
         cmd = 'touch {output} &> {log}'
     return cmd
@@ -503,7 +506,8 @@ rule plotCoverage:
 
 rule bamCoverage:
     input:
-        rules.alignmentSieve.output.bam
+        bam  = rules.alignmentSieve.output.bam,
+        index  = f'{rules.alignmentSieve.output.bam}.bai'
     output:
         'bigwig/{sample}.filtered.bigwig'
     params:
@@ -515,7 +519,7 @@ rule bamCoverage:
     threads:
         config['threads']
     shell:
-        'bamCoverage --bam {input} --outFileName {output} '
+        'bamCoverage --bam {input.bam} --outFileName {output} '
         '--binSize {params.binSize} --numberOfProcessors {threads} &> {log}'
 
 
@@ -666,12 +670,12 @@ rule multiQC:
         expand('qc/fastqc/{single}.raw_fastqc.zip',
             single=samples['single']),
         expand('qc/fastq_screen/{single}.fastq_screen.txt',
-            single=samples['single']),
+            single=samples['single']) if config['fastq_screen'] else [],
         expand('qc/cutadapt/{sample}.cutadapt.txt',
             sample=SAMPLES),
         expand('qc/fastqc/{single}.trim_fastqc.zip',
             single=samples['single']),
-        expand('qc/{sample}.hisat2.txt',
+        expand('qc/hisat2/{sample}.hisat2.txt',
             sample=SAMPLES),
         #expand('qc/deeptools/estimateReadFiltering/{sample}.txt',
         #    sample=SAMPLES),
