@@ -70,6 +70,8 @@ rule fastqc:
     output:
         html = 'qc/fastqc/{single}.raw_fastqc.html',
         zip = 'qc/fastqc/unmod/{single}.raw.fastqc.zip'
+    group:
+        'processFASTQ'
     log:
         'logs/fastqc/{single}.log'
     wrapper:
@@ -83,6 +85,8 @@ rule modifyFastQC:
         'qc/fastqc/{single}.raw_fastqc.zip'
     params:
         name = lambda wc: f'{wc.single}'
+    group:
+        'processFASTQ'
     log:
         'logs/modifyFastQC/{single}.raw.log'
     conda:
@@ -128,6 +132,8 @@ rule cutadapt:
         minimumLength = config['cutadapt']['minimumLength'],
         qualityCutoff = config['cutadapt']['qualityCutoff'],
         GCcontent = config['cutadapt']['GCcontent']
+    group:
+        'processFASTQ'
     log:
         'logs/cutadapt/{sample}.log'
     conda:
@@ -144,7 +150,7 @@ rule modifyCutadapt:
     output:
         'qc/cutadapt/{sample}.cutadapt.txt'
     group:
-        'cutadapt'
+        'processFASTQ'
     log:
         'logs/modifyCutadapt/{sample}.log'
     conda:
@@ -164,6 +170,8 @@ if config['fastq_screen']:
             fastq_screen_config = config['fastq_screen'],
             subset = 100000,
             aligner = 'bowtie2'
+        group:
+            'processFASTQ'
         log:
             'logs/fastq_screen/{single}.log'
         threads:
@@ -178,6 +186,8 @@ rule fastQCtrimmed:
     output:
         html = 'qc/fastqc/{single}.trim_fastqc.html',
         zip = 'qc/fastqc/{single}.trim_fastqc.zip'
+    group:
+        'processFASTQ'
     log:
         'logs/fastqc_trimmed/{single}.log'
     wrapper:
