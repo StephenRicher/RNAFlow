@@ -62,7 +62,7 @@ wildcard_constraints:
 
 rule all:
     input:
-        ['qc/multiqc']
+        ['qc/multiqc', 'counts/countMatrix-merged.txt']
 
 rule fastqc:
     input:
@@ -674,6 +674,23 @@ rule featureCounts:
         '(featureCounts --primary -C -t exon -g gene_id '
         '-a {input.gtf} -o {output.counts} {input.bam} '
         '&& mv {output.counts}.summary {output.qc}) &> {log}'
+
+
+rule mergeFeatureCounts:
+    input:
+        expand('counts/{sample}.featureCounts.txt', sample=SAMPLES)
+    output:
+        'counts/countMatrix-merged.txt'
+    params:
+        samples = SAMPLES
+    log:
+        'logs/mergeFeatureCounts.log'
+    conda:
+        f'{ENVS}/python3.yaml'
+    shell:
+        '{SCRIPTS}/mergeCounts.py {input} --samples {params.samples} '
+        '> {output} 2> {log}'
+
 
 rule multiQC:
     input:
