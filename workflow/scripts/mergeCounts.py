@@ -38,7 +38,7 @@ def parse_arguments():
         'infiles', nargs='+',
         help='featureCounts results to merge')
     parser.add_argument(
-        '--samples', default=[],
+        '--samples', nargs='+', default=[],
         help='Sample names for counts matrix - must be one for each infile')
 
     return parser.parse_args()
