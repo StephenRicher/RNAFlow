@@ -1,8 +1,6 @@
 channels :
   - conda-forge
 dependencies :
-  - python=3
-  - pip:
-    - numpy
+  - python=3.7
+  - pip :
     - pandas
-    - scipy
