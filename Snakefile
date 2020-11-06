@@ -54,6 +54,7 @@ samples = load_samples(config['data'])
 
 # Extract sample names
 SAMPLES = list(samples['sample'].unique())
+GROUPS = list(samples['group'])
 
 wildcard_constraints:
     single = '|'.join(samples['single']),
@@ -453,7 +454,7 @@ rule plotCorrelation:
         '--plotFile {output.plot} --outFileCorMatrix {output.matrix} &> {log}'
 
 
-def setColours(samples):
+def setColours(groups):
     """ Find group and assign to specific colour. """
     colours = ''
     colourPool = ['#E69F00', '#56B4E9', '#009E73', '#F0E442',
@@ -461,8 +462,7 @@ def setColours(samples):
     # Add double quotes for compatibility with shell
     colourPool = [f'"{colour}"' for colour in colourPool]
     usedColours = {}
-    for sample in samples:
-        group = sample.split('-')[0]
+    for group in groups:
         if group not in usedColours:
             usedColours[group] = colourPool[0]
             # Remove from pool
@@ -479,7 +479,7 @@ rule plotPCA:
         data = 'qc/deeptools/plotPCA.tab'
     params:
         labels = ' '.join(SAMPLES),
-        colours = setColours(SAMPLES)
+        colours = setColours(GROUPS)
     log:
         'logs/plotPCA.log'
     conda:
