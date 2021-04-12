@@ -64,18 +64,62 @@ def set_config(config, default, outer_key=''):
     return config
 
 
-def load_samples(file):
+class Samples:
 
-    samples = pd.read_table(file, sep = ',', dtype = {'rep' : str})
-    # Validate read file input with wildcard definitions
-    if not samples['rep'].str.match(r'\d+').all():
-        sys.exit(f'Invalid replicate definition in {file}.')
-    if not samples['read'].str.match(r'R[12]').all():
-        sys.exit(f'Invalid read definition in {file}.')
+    def __init__(self, samplesFile: str, paired: bool, sep='\s+'):
+        self.table = self.readSamples(samplesFile, sep=sep)
+        self.paired = paired
 
-    samples['single'] = samples[['group', 'rep', 'read']].apply(lambda x: '-'.join(x), axis=1)
-    samples['sample'] = (samples[['group', 'rep']]
-        .apply(lambda x: '-'.join(x), axis = 1))
-    samples = samples.set_index(['group', 'sample', 'single'], drop=False)
 
-    return samples
+    def readSamples(self, samplesFile, sep='\s+'):
+        table = pd.read_table(
+            samplesFile, sep=sep, dtype={'rep': str},
+            usecols=['group', 'rep', 'R1', 'R2'])
+
+        # Validate read file input with wildcard definitions
+        if not table['group'].str.match(r'[^-\.\/]+').all():
+            raise ValueError(
+                'Groups must not contain the following characters: - . /')
+        table['sample'] = (table[['group', 'rep']].apply(lambda x: '-'.join(x), axis=1))
+
+        # Ensure no duplicate names
+        if table['sample'].duplicated().any():
+            raise ValueError(f'Duplicate sample name definitions in {samplesFile}.')
+
+        return table
+
+
+    def groups(self):
+        """ Return unmodified group-rep dictionary """
+        return self.table.groupby('group', sort=False)['rep'].apply(list).to_dict()
+
+
+    def samples(self):
+        """ Return unmodified sample list """
+        return self.table['sample']
+
+
+    def singles(self):
+        R1 = [f'{sample}-R1' for sample in self.samples()]
+        if self.paired:
+            R2 = [f'{sample}-R2' for sample in self.samples()]
+            return R1 + R2
+        else:
+            return R1
+
+
+    def groupCompares(self):
+        """ Return list of pairwise group comparison """
+        pairs = itertools.combinations(list(self.groups()), 2)
+        return [f'{i[0]}-vs-{i[1]}' for i in pairs]
+
+    def sampleCompares(self):
+        """ Return list of pairwise sample comparison """
+        pairs = itertools.combinations(self.samples(), 2)
+        return [f'{i[0]}-vs-{i[1]}' for i in pairs]
+
+
+    def path(self, sample, read):
+        """ Return path of sample-read """
+        paths = self.table.loc[self.table['sample'] == sample, list(read)]
+        return paths.values.tolist()[0]

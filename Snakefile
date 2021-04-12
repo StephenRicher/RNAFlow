@@ -5,7 +5,7 @@ import re
 import sys
 import tempfile
 import pandas as pd
-from snake_setup import set_config, load_samples
+from snake_setup import set_config, Samples
 
 BASE = workflow.basedir
 
@@ -24,6 +24,7 @@ default_config = {
     'threads':           workflow.cores,
     'data':              ''          ,
     'paired':            ''          ,
+    'QConly':            False       ,
     'computeMatrixScale':
         {'exon':         True        ,},
     'genome':
@@ -49,51 +50,47 @@ config = set_config(config, default_config)
 workdir: config['workdir']
 BUILD = config['genome']['build']
 
-# Read path to samples in pandas
-samples = load_samples(config['data'])
+RNASeq = Samples(config['data'], config['paired'])
 
 # Extract sample names
-SAMPLES = list(samples['sample'].unique())
-GROUPS = list(samples['group'])
+SAMPLES = RNASeq.samples()
 
 wildcard_constraints:
-    single = '|'.join(samples['single']),
-    sample = '|'.join(samples['sample']),
-    rep = '|'.join(samples['rep'].unique())
+    sample = '|'.join(RNASeq.samples())
 
 rule all:
     input:
-        ['qc/multiqc', 'counts/countMatrix-merged.txt']
+        'qc/multiqc',
+        'counts/countMatrix-merged.txt' if not config['QConly'] else []
 
 rule fastqc:
     input:
-        lambda wc: samples.xs(wc.single, level = 2)['path']
+        lambda wc: RNASeq.path(wc.sample, [wc.read])
     output:
-        html = 'qc/fastqc/{single}.raw_fastqc.html',
-        zip = 'qc/fastqc/unmod/{single}.raw.fastqc.zip'
+        html = 'qc/fastqc/{sample}-{read}.raw_fastqc.html',
+        zip = 'qc/fastqc/unmod/{sample}-{read}.raw.fastqc.zip'
     group:
         'processFASTQ'
     log:
-        'logs/fastqc/{single}.log'
+        'logs/fastqc/{sample}-{read}.log'
     wrapper:
         '0.49.0/bio/fastqc'
 
 
 rule modifyFastQC:
     input:
-        'qc/fastqc/unmod/{single}.raw.fastqc.zip'
+        'qc/fastqc/unmod/{sample}-{read}.raw.fastqc.zip'
     output:
-        'qc/fastqc/{single}.raw_fastqc.zip'
-    params:
-        name = lambda wc: f'{wc.single}'
+        'qc/fastqc/{sample}-{read}.raw_fastqc.zip'
     group:
         'processFASTQ'
     log:
-        'logs/modifyFastQC/{single}.raw.log'
+        'logs/modifyFastQC/{sample}-{read}.raw.log'
     conda:
         f'{ENVS}/python3.yaml'
     shell:
-        '{SCRIPTS}/modifyFastQC.py {input} {output} {params.name} &> {log}'
+        '{SCRIPTS}/modifyFastQC.py {input} {output} '
+        '{wildcards.sample}-{wildcards.read} &> {log}'
 
 
 def cutadaptOutput():
@@ -121,7 +118,7 @@ def cutadaptCmd():
 
 rule cutadapt:
     input:
-        lambda wc: samples.xs(wc.sample, level=1)['path']
+        lambda wc: RNASeq.path(wc.sample, ['R1', 'R2'])
     output:
         trimmed = cutadaptOutput(),
         qc = 'qc/cutadapt/unmod/{sample}.cutadapt.txt'
@@ -160,13 +157,14 @@ rule modifyCutadapt:
         '{SCRIPTS}/modifyCutadapt.py {wildcards.sample} {input} '
         '> {output} 2> {log}'
 
+
 if config['fastq_screen']:
     rule fastqScreen:
         input:
-            'fastq/trimmed/{single}.trim.fastq.gz'
+            'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
         output:
-            txt = 'qc/fastq_screen/{single}.fastq_screen.txt',
-            png = 'qc/fastq_screen/{single}.fastq_screen.png'
+            txt = 'qc/fastq_screen/{sample}-{read}.fastq_screen.txt',
+            png = 'qc/fastq_screen/{sample}-{read}.fastq_screen.png'
         params:
             fastq_screen_config = config['fastq_screen'],
             subset = 100000,
@@ -174,7 +172,7 @@ if config['fastq_screen']:
         group:
             'processFASTQ'
         log:
-            'logs/fastq_screen/{single}.log'
+            'logs/fastq_screen/{sample}-{read}.log'
         threads:
             config['threads']
         wrapper:
@@ -183,14 +181,14 @@ if config['fastq_screen']:
 
 rule fastQCtrimmed:
     input:
-        'fastq/trimmed/{single}.trim.fastq.gz'
+        'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
     output:
-        html = 'qc/fastqc/{single}.trim_fastqc.html',
-        zip = 'qc/fastqc/{single}.trim_fastqc.zip'
+        html = 'qc/fastqc/{sample}-{read}.trim_fastqc.html',
+        zip = 'qc/fastqc/{sample}-{read}.trim_fastqc.zip'
     group:
         'processFASTQ'
     log:
-        'logs/fastqc_trimmed/{single}.log'
+        'logs/fastqc_trimmed/{sample}-{read}.log'
     wrapper:
         '0.49.0/bio/fastqc'
 
@@ -479,7 +477,7 @@ rule plotPCA:
         data = 'qc/deeptools/plotPCA.tab'
     params:
         labels = ' '.join(SAMPLES),
-        colours = setColours(GROUPS)
+        colours = setColours(RNASeq.groups())
     log:
         'logs/plotPCA.log'
     conda:
@@ -695,17 +693,17 @@ rule mergeFeatureCounts:
 rule multiQC:
     input:
         expand('qc/fastqc/{single}.raw_fastqc.zip',
-            single=samples['single']),
+            single=RNASeq.singles()),
         expand('qc/fastq_screen/{single}.fastq_screen.txt',
-            single=samples['single']) if config['fastq_screen'] else [],
+            single=RNASeq.singles()) if config['fastq_screen'] else [],
         expand('qc/cutadapt/{sample}.cutadapt.txt',
             sample=SAMPLES),
         expand('qc/fastqc/{single}.trim_fastqc.zip',
-            single=samples['single']),
-        expand('qc/hisat2/{sample}.hisat2.txt',
-            sample=SAMPLES),
+            single=RNASeq.singles()),
+
         #expand('qc/deeptools/estimateReadFiltering/{sample}.txt',
         #    sample=SAMPLES),
+        [expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
         'qc/deeptools/plotCorrelation.tsv',
         'qc/deeptools/plotPCA.tab',
         'qc/deeptools/plotCoverage.info',
@@ -718,7 +716,7 @@ rule multiQC:
         expand('qc/samtools/flagstat/{sample}.flagstat.txt',
             sample=SAMPLES),
         expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
-            sample=SAMPLES)
+            sample=SAMPLES)] if not config['QConly'] else []
     output:
         directory('qc/multiqc')
     log:
