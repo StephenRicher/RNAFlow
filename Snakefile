@@ -32,8 +32,7 @@ default_config = {
          'index':        ''          ,
          'annotation':   ''          ,
          'sequence':     ''          ,
-         'genes':        ''          ,
-         'blacklist':    None        ,},
+         'genes':        ''          ,},
     'cutadapt':
         {'forwardAdapter': 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA',
          'reverseAdapter': 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT',
@@ -42,6 +41,14 @@ default_config = {
          'minimumLength':   0                                 ,
          'qualityCutoff':  '0,0'                              ,
          'GCcontent':       50                                ,},
+    'filtering':
+        {'ignoreDuplicates':  False,
+         'minMappingQuality': 15   ,
+         'minFragmentLength': 0    ,
+         'maxFragmentLength': 0    ,
+         'samFlagInclude'   : None ,
+         'samFlagExclude'   : None ,
+         'blackListFileName': None ,},
     'fastq_screen':         None                              ,
 }
 
@@ -57,6 +64,9 @@ SAMPLES = RNASeq.samples()
 
 wildcard_constraints:
     sample = '|'.join(RNASeq.samples())
+
+# Create tmpdir to ensure it is set
+os.makedirs(config['tmpdir'], exist_ok=True)
 
 rule all:
     input:
@@ -217,7 +227,8 @@ rule hisat2:
     conda:
         f'{ENVS}/hisat2.yaml'
     threads:
-        max(1, (config['threads'] / 2) - 1)
+        #max(1, (config['threads'] / 2) - 1)
+        max(1, (config['threads'] - 1))
     shell:
         hisat2Cmd()
 
@@ -226,13 +237,15 @@ rule fixBAM:
     input:
         rules.hisat2.output.sam
     output:
-        pipe('mapped/{sample}.fixmate.bam')
+        'mapped/{sample}.fixmate.bam'
+        #pipe('mapped/{sample}.fixmate.bam')
     log:
         'logs/fixBAM/{sample}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     shell:
-        'samtools fixmate -O bam,level=0 -m {input} {output} &> {log}'
+        'samtools fixmate -O bam -m {input} {output} &> {log}'
+        #'samtools fixmate -O bam,level=0 -m {input} {output} &> {log}'
 
 
 rule sortBAM:
@@ -329,7 +342,7 @@ rule samtoolsFlagstat:
 
 
 def setBlacklistCommand():
-    if config['genome']['blacklist']:
+    if config['filtering']['blackListFileName']:
         cmd = ('bedtools merge -d {params.distance} -i {input} '
                '> {output} 2> {log}')
     else:
@@ -339,7 +352,7 @@ def setBlacklistCommand():
 
 rule processBlacklist:
     input:
-        config['genome']['blacklist'] if config['genome']['blacklist'] else []
+        config['filtering']['blackListFileName'] if config['filtering']['blackListFileName'] else []
     output:
         f'genome/{BUILD}-blacklist.bed'
     params:
@@ -379,32 +392,71 @@ rule estimateReadFiltering:
         '--samFlagExclude 260 {params.properPair} '
         '--numberOfProcessors {threads} &> {log}'
 
+if False:
+    rule alignmentSieve:
+        input:
+            bam = rules.markdupBAM.output.bam,
+            index = 'mapped/{sample}.markdup.bam.bai',
+            blacklist = rules.processBlacklist.output
+        output:
+            bam = 'mapped/{sample}.filtered.bam',
+            qc = 'qc/deeptools/{sample}-filter-metrics.txt'
+        params:
+            minMapQ = config['filtering']['minMappingQuality'],
+            minFragmentLength = config['filtering']['minFragmentLength'],
+            maxFragmentLength = config['filtering']['maxFragmentLength'],
+            samFlagInclude = f'--samFlagInclude {config["filtering"]["samFlagInclude"]}' if config['filtering']['samFlagInclude'] else '',
+            samFlagExclude = f'--samFlagExclude {config["filtering"]["samFlagExclude"]}' if config['filtering']['samFlagExclude'] else '',
+            ignoreDuplicates = '--ignoreDuplicates' if config['filtering']['ignoreDuplicates'] else ''
+        log:
+            'logs/alignmentSieve/{sample}.log'
+        conda:
+            f'{ENVS}/deeptools.yaml'
+        threads:
+            1
+        shell:
+            f'export TMPDIR={config["tmpdir"]}; '
+            'alignmentSieve --bam {input.bam} --outFile {output.bam} '
+            '--minMappingQuality {params.minMapQ} '
+            '{params.ignoreDuplicates} '
+            '{params.samFlagInclude} {params.samFlagExclude} '
+            '--minFragmentLength {params.minFragmentLength} '
+            '--maxFragmentLength {params.maxFragmentLength} '
+            '--blackListFileName {input.blacklist} --verbose '
+            '--numberOfProcessors {threads} --filterMetrics {output.qc} &> {log}'
 
-rule alignmentSieve:
+rule filterBAM:
     input:
         bam = rules.markdupBAM.output.bam,
         index = 'mapped/{sample}.markdup.bam.bai',
+    output:
+        pipe('mapped/{sample}.filteredPart1.bam')
+    params:
+        minMapQ = config['filtering']['minMappingQuality'],
+        samFlagInclude = f'-f {config["filtering"]["samFlagInclude"]}' if config['filtering']['samFlagInclude'] else '',
+        samFlagExclude = f'-F {config["filtering"]["samFlagExclude"]}' if config['filtering']['samFlagExclude'] else '',
+    log:
+        'logs/filterBAM/{sample}.log'
+    conda:
+        f'{ENVS}/samtools.yaml'
+    shell:
+        'samtools view -q {params.minMapQ} {params.samFlagInclude} '
+        '{params.samFlagExclude} -u {input.bam} > {output} 2> {log} '
+
+
+rule filterBlacklist:
+    input:
+        bam = rules.filterBAM.output,
         blacklist = rules.processBlacklist.output
     output:
-        bam = 'mapped/{sample}.filtered.bam',
-        qc = 'qc/deeptools/{sample}-filter-metrics.txt'
-    params:
-        minMapQ = 15,
-        maxFragmentLength = 2000,
-        properPair = '--samFlagInclude 2' if config['paired'] else '',
+        'mapped/{sample}.filtered.bam'
     log:
-        'logs/alignmentSieve/{sample}.log'
+        'logs/filterBlacklist/{sample}.log'
     conda:
-        f'{ENVS}/deeptools.yaml'
-    threads:
-        config['threads']
+        f'{ENVS}/bedtools.yaml'
     shell:
-        'alignmentSieve --bam {input.bam} --outFile {output.bam} '
-        '--minMappingQuality {params.minMapQ} --ignoreDuplicates '
-        '--samFlagExclude 260 {params.properPair} '
-        '--maxFragmentLength {params.maxFragmentLength} '
-        '--blackListFileName {input.blacklist} '
-        '--numberOfProcessors {threads} --filterMetrics {output.qc} &> {log}'
+        'bedtools intersect -v -abam {input.bam} -b {input.blacklist} '
+        '> {output} 2> {log}'
 
 
 rule multiBamSummary:
@@ -514,8 +566,8 @@ rule plotCoverage:
 
 rule bamCoverage:
     input:
-        bam  = rules.alignmentSieve.output.bam,
-        index  = f'{rules.alignmentSieve.output.bam}.bai'
+        bam  = rules.filterBlacklist.output,
+        index  = f'{rules.filterBlacklist.output}.bai'
     output:
         'bigwig/{sample}.filtered.bigwig'
     params:
@@ -659,18 +711,22 @@ rule plotHeatmapGroups:
 
 rule featureCounts:
     input:
-        bam = rules.sortBAM.output,
+        bam = rules.filterBlacklist.output,
         gtf = config['genome']['annotation']
     output:
         counts = 'counts/{sample}.featureCounts.txt',
         qc = 'qc/featurecounts/{sample}.featureCounts.txt.summary'
+    params:
+        paired = '-pC' if config['paired'] else ''
     log:
         'logs/featureCounts/{sample}.log'
     conda:
         f'{ENVS}/subread.yaml'
+    threads:
+        1
     shell:
-        '(featureCounts --primary -C -t exon -g gene_id '
-        '-a {input.gtf} -o {output.counts} {input.bam} '
+        '(featureCounts {params.paired} -a {input.gtf} -o {output.counts} '
+        '{input.bam} -t exon -g gene_id -T {threads} '
         '&& mv {output.counts}.summary {output.qc}) &> {log}'
 
 
@@ -700,7 +756,6 @@ rule multiQC:
             sample=SAMPLES),
         expand('qc/fastqc/{single}.trim_fastqc.zip',
             single=RNASeq.singles()),
-
         #expand('qc/deeptools/estimateReadFiltering/{sample}.txt',
         #    sample=SAMPLES),
         [expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
