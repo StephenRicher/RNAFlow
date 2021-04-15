@@ -25,14 +25,12 @@ default_config = {
     'data':              ''          ,
     'paired':            ''          ,
     'QConly':            False       ,
-    'computeMatrixScale':
-        {'exon':         True        ,},
     'genome':
-        {'build':        'genome'    ,
-         'index':        ''          ,
-         'annotation':   ''          ,
-         'sequence':     ''          ,
-         'genes':        ''          ,},
+        {'build':         'genome'    ,
+         'transcriptome': ''          ,
+         'annotation':    ''          ,
+         'sequence':      ''          ,
+         'genes':         ''          ,},
     'cutadapt':
         {'forwardAdapter': 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA',
          'reverseAdapter': 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT',
@@ -41,14 +39,6 @@ default_config = {
          'minimumLength':   0                                 ,
          'qualityCutoff':  '0,0'                              ,
          'GCcontent':       50                                ,},
-    'filtering':
-        {'ignoreDuplicates':  False,
-         'minMappingQuality': 15   ,
-         'minFragmentLength': 0    ,
-         'maxFragmentLength': 0    ,
-         'samFlagInclude'   : None ,
-         'samFlagExclude'   : None ,
-         'blackListFileName': None ,},
     'fastq_screen':         None                              ,
 }
 
@@ -71,7 +61,52 @@ os.makedirs(config['tmpdir'], exist_ok=True)
 rule all:
     input:
         'qc/multiqc',
-        'counts/countMatrix-merged.txt' if not config['QConly'] else []
+        #'counts/countMatrix-merged.txt' if not config['QConly'] else []
+
+
+rule bgzipGenome:
+    input:
+        config['genome']['sequence']
+    output:
+        f'genome/{config["genome"]["build"]}.fa.gz'
+    group:
+        'prepareGenome'
+    log:
+        'logs/bgzipGenome.log'
+    conda:
+        f'{ENVS}/tabix.yaml'
+    shell:
+        '(zcat -f {input} | bgzip > {output}) 2> {log}'
+
+
+
+rule indexGenome:
+    input:
+        rules.bgzipGenome.output
+    output:
+        f'{rules.bgzipGenome.output}.fai'
+    group:
+        'prepareGenome'
+    log:
+        'logs/indexGenome.log'
+    conda:
+        f'{ENVS}/samtools.yaml'
+    shell:
+        'samtools faidx {input} &> {log}'
+
+
+rule getChromSizes:
+    input:
+        rules.indexGenome.output
+    output:
+        f'genome/{config["genome"]["build"]}.chrom.sizes'
+    group:
+        'prepareGenome'
+    log:
+        'logs/getChromSizes.log'
+    shell:
+        'cut -f 1,2 {input} > {output} 2> {log}'
+
 
 rule fastqc:
     input:
@@ -203,101 +238,64 @@ rule fastQCtrimmed:
         '0.49.0/bio/fastqc'
 
 
-def hisat2Cmd():
+rule buildKallistoIndex:
+    input:
+        config['genome']['transcriptome']
+    output:
+        f'kallisto/{config["genome"]["build"]}-transcripts.idx'
+    log:
+        'logs/buildKallistoIndex.log'
+    conda:
+        f'{ENVS}/kallisto.yaml'
+    shell:
+        'kallisto index -i {output} {input} &> {log}'
+
+
+def kallistoCmd():
     if config['paired']:
-        return ('hisat2 -x {params.index} -1 {input.reads[0]} '
-            '-2 {input.reads[1]} --threads {threads} '
-            '--summary-file {output.qc} > {output.sam} 2> {log}')
+        return ('kallisto quant -i {input.index} -o kallisto/{wildcards.sample}/ '
+                '--genomebam --gtf {input.gtf} --chromosomes {input.chromSizes} '
+                '-b {params.bootstraps} {input.reads} &> {log} '
+                '&& cp {log} {output.qc}')
     else:
-        return ('hisat2 -x {params.index} -p {threads} '
-            '-U {input.reads[0]} --summary-file {output.qc} '
-            '> {output.sam} 2> {log}')
+        return ('kallisto quant -i {input.index} -o kallisto/{wildcards.sample}/ '
+                '--genomebam --gtf {input.gtf} --chromosomes {input.chromSizes} '
+                '-b {params.bootstraps} '
+                '--single -l {params.fragmentLength} -s {params.fragmentSD} '
+                '--threads {threads} {input.reads} &> {log} '
+                '&& cp {log} {output.qc}')
 
 
-rule hisat2:
+rule kallistoQuant:
     input:
-        reads = rules.cutadapt.output.trimmed
+        index = rules.buildKallistoIndex.output,
+        reads = rules.cutadapt.output.trimmed,
+        gtf = config['genome']['annotation'],
+        chromSizes = rules.getChromSizes.output
     output:
-        sam = pipe('mapped/{sample}.sam'),
-        qc = 'qc/hisat2/{sample}.hisat2.txt'
+        qc = 'qc/kallisto/{sample}.stdout',
+        abundancesH5 = 'kallisto/{sample}/abundance.h5',
+        abundancesTSV = 'kallisto/{sample}/abundance.tsv',
+        runInfo = 'kallisto/{sample}/run_info.json',
+        pseudoAlign = 'kallisto/{sample}/pseudoalignments.bam',
+        pseudoAlignIdx = 'kallisto/{sample}/pseudoalignments.bam.bai'
     params:
-        index = config['genome']['index']
+        bootstraps = 30,
+        fragmentLength = 200,
+        fragmentSD = 2
     log:
-        'logs/hisat2/{sample}.log'
+        'logs/kallistoQuant/{sample}.log'
     conda:
-        f'{ENVS}/hisat2.yaml'
-    threads:
-        #max(1, (config['threads'] / 2) - 1)
-        max(1, (config['threads'] - 1))
-    shell:
-        hisat2Cmd()
-
-
-rule fixBAM:
-    input:
-        rules.hisat2.output.sam
-    output:
-        'mapped/{sample}.fixmate.bam'
-        #pipe('mapped/{sample}.fixmate.bam')
-    log:
-        'logs/fixBAM/{sample}.log'
-    conda:
-        f'{ENVS}/samtools.yaml'
-    shell:
-        'samtools fixmate -O bam -m {input} {output} &> {log}'
-        #'samtools fixmate -O bam,level=0 -m {input} {output} &> {log}'
-
-
-rule sortBAM:
-    input:
-        rules.fixBAM.output
-    output:
-        'mapped/{sample}.sort.bam'
-    log:
-        'logs/sortBAM/{sample}.log'
-    conda:
-        f'{ENVS}/samtools.yaml'
-    threads:
-        max(1, (config['threads'] / 2) - 1)
-    shell:
-        'samtools sort -@ {threads} {input} > {output} 2> {log}'
-
-
-rule markdupBAM:
-    input:
-        rules.sortBAM.output
-    output:
-        bam = 'mapped/{sample}.markdup.bam',
-        qc = 'qc/deduplicate/{sample}.txt'
-    log:
-        'logs/markdupBAM/{sample}.log'
-    conda:
-        f'{ENVS}/samtools.yaml'
+        f'{ENVS}/kallisto.yaml'
     threads:
         config['threads']
     shell:
-        'samtools markdup -@ {threads} '
-        '-sf {output.qc} {input} {output.bam} &> {log}'
-
-
-rule indexBAM:
-    input:
-        'mapped/{sample}.{stage}.bam'
-    output:
-        'mapped/{sample}.{stage}.bam.bai'
-    log:
-        'logs/indexBAM/{sample}-{stage}.log'
-    conda:
-        f'{ENVS}/samtools.yaml'
-    threads:
-        min(1, (config['threads'] / 2) - 1,)
-    shell:
-        'samtools index -@ {threads} {input} &> {log}'
+        kallistoCmd()
 
 
 rule samtoolsStats:
     input:
-        rules.markdupBAM.output.bam
+        rules.kallistoQuant.output.pseudoAlign
     output:
         'qc/samtools/stats/{sample}.stats.txt'
     group:
@@ -312,8 +310,8 @@ rule samtoolsStats:
 
 rule samtoolsIdxstats:
     input:
-        bam = 'mapped/{sample}.markdup.bam',
-        index = 'mapped/{sample}.markdup.bam.bai'
+        bam = rules.kallistoQuant.output.pseudoAlign,
+        index = rules.kallistoQuant.output.pseudoAlignIdx
     output:
         'qc/samtools/idxstats/{sample}.idxstats.txt'
     group:
@@ -328,7 +326,7 @@ rule samtoolsIdxstats:
 
 rule samtoolsFlagstat:
     input:
-        rules.markdupBAM.output.bam
+        rules.kallistoQuant.output.pseudoAlign
     output:
         'qc/samtools/flagstat/{sample}.flagstat.txt'
     group:
@@ -341,128 +339,12 @@ rule samtoolsFlagstat:
         'samtools flagstat {input} > {output} 2> {log}'
 
 
-def setBlacklistCommand():
-    if config['filtering']['blackListFileName']:
-        cmd = ('bedtools merge -d {params.distance} -i {input} '
-               '> {output} 2> {log}')
-    else:
-        cmd = 'touch {output} &> {log}'
-    return cmd
-
-
-rule processBlacklist:
-    input:
-        config['filtering']['blackListFileName'] if config['filtering']['blackListFileName'] else []
-    output:
-        f'genome/{BUILD}-blacklist.bed'
-    params:
-        # Max distance between features allowed for features to be merged.
-        distance = 1000
-    log:
-        f'logs/processBlacklist/{BUILD}.log'
-    conda:
-        f'{ENVS}/bedtools.yaml'
-    shell:
-        setBlacklistCommand()
-
-
-rule estimateReadFiltering:
-    input:
-        bam = rules.markdupBAM.output.bam,
-        index = 'mapped/{sample}.markdup.bam.bai',
-        blacklist = rules.processBlacklist.output
-    output:
-        'qc/deeptools/estimateReadFiltering/{sample}.txt'
-    params:
-        minMapQ = 15,
-        binSize = 10000,
-        distanceBetweenBins = 0,
-        properPair = '--samFlagInclude 2' if config['paired'] else '',
-    log:
-        'logs/estimateReadFiltering/{sample}.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    threads:
-        config['threads']
-    shell:
-        'estimateReadFiltering --bamfiles {input.bam} --outFile {output} '
-        '--binSize {params.binSize} --blackListFileName {input.blacklist} '
-        '--distanceBetweenBins {params.distanceBetweenBins} '
-        '--minMappingQuality {params.minMapQ} --ignoreDuplicates '
-        '--samFlagExclude 260 {params.properPair} '
-        '--numberOfProcessors {threads} &> {log}'
-
-if False:
-    rule alignmentSieve:
-        input:
-            bam = rules.markdupBAM.output.bam,
-            index = 'mapped/{sample}.markdup.bam.bai',
-            blacklist = rules.processBlacklist.output
-        output:
-            bam = 'mapped/{sample}.filtered.bam',
-            qc = 'qc/deeptools/{sample}-filter-metrics.txt'
-        params:
-            minMapQ = config['filtering']['minMappingQuality'],
-            minFragmentLength = config['filtering']['minFragmentLength'],
-            maxFragmentLength = config['filtering']['maxFragmentLength'],
-            samFlagInclude = f'--samFlagInclude {config["filtering"]["samFlagInclude"]}' if config['filtering']['samFlagInclude'] else '',
-            samFlagExclude = f'--samFlagExclude {config["filtering"]["samFlagExclude"]}' if config['filtering']['samFlagExclude'] else '',
-            ignoreDuplicates = '--ignoreDuplicates' if config['filtering']['ignoreDuplicates'] else ''
-        log:
-            'logs/alignmentSieve/{sample}.log'
-        conda:
-            f'{ENVS}/deeptools.yaml'
-        threads:
-            1
-        shell:
-            f'export TMPDIR={config["tmpdir"]}; '
-            'alignmentSieve --bam {input.bam} --outFile {output.bam} '
-            '--minMappingQuality {params.minMapQ} '
-            '{params.ignoreDuplicates} '
-            '{params.samFlagInclude} {params.samFlagExclude} '
-            '--minFragmentLength {params.minFragmentLength} '
-            '--maxFragmentLength {params.maxFragmentLength} '
-            '--blackListFileName {input.blacklist} --verbose '
-            '--numberOfProcessors {threads} --filterMetrics {output.qc} &> {log}'
-
-rule filterBAM:
-    input:
-        bam = rules.markdupBAM.output.bam,
-        index = 'mapped/{sample}.markdup.bam.bai',
-    output:
-        pipe('mapped/{sample}.filteredPart1.bam')
-    params:
-        minMapQ = config['filtering']['minMappingQuality'],
-        samFlagInclude = f'-f {config["filtering"]["samFlagInclude"]}' if config['filtering']['samFlagInclude'] else '',
-        samFlagExclude = f'-F {config["filtering"]["samFlagExclude"]}' if config['filtering']['samFlagExclude'] else '',
-    log:
-        'logs/filterBAM/{sample}.log'
-    conda:
-        f'{ENVS}/samtools.yaml'
-    shell:
-        'samtools view -q {params.minMapQ} {params.samFlagInclude} '
-        '{params.samFlagExclude} -u {input.bam} > {output} 2> {log} '
-
-
-rule filterBlacklist:
-    input:
-        bam = rules.filterBAM.output,
-        blacklist = rules.processBlacklist.output
-    output:
-        'mapped/{sample}.filtered.bam'
-    log:
-        'logs/filterBlacklist/{sample}.log'
-    conda:
-        f'{ENVS}/bedtools.yaml'
-    shell:
-        'bedtools intersect -v -abam {input.bam} -b {input.blacklist} '
-        '> {output} 2> {log}'
-
-
 rule multiBamSummary:
     input:
-        bams = expand('mapped/{sample}.filtered.bam', sample=SAMPLES),
-        indexes = expand('mapped/{sample}.filtered.bam.bai', sample=SAMPLES)
+        bams = expand('kallisto/{sample}/pseudoalignments.bam',
+            sample=SAMPLES),
+        indexes = expand('kallisto/{sample}/pseudoalignments.bam.bai',
+            sample=SAMPLES)
     output:
         'qc/deeptools/multiBamSummary.npz'
     params:
@@ -540,210 +422,29 @@ rule plotPCA:
         '--outFileNameData {output.data} &> {log}'
 
 
-rule plotCoverage:
-    input:
-        bams = expand('mapped/{sample}.filtered.bam', sample=SAMPLES),
-        indexes = expand('mapped/{sample}.filtered.bam.bai', sample=SAMPLES)
-    output:
-        plot = 'qc/deeptools/plotCoverage.png',
-        data = 'qc/deeptools/plotCoverage.tab',
-        info = 'qc/deeptools/plotCoverage.info'
-    params:
-        nSamples = 1000000,
-        labels = ' '.join(SAMPLES)
-    log:
-        'logs/plotCoverage.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    threads:
-        config['threads']
-    shell:
-        'plotCoverage --bamfiles {input.bams} --labels {params.labels} '
-        '--plotFile {output.plot} --outRawCounts {output.data} '
-        '--numberOfSamples {params.nSamples} --numberOfProcessors {threads} '
-        '> {output.info} 2> {log}'
+def setBlacklistCommand():
+    if config['filtering']['blackListFileName']:
+        cmd = ('bedtools merge -d {params.distance} -i {input} '
+               '> {output} 2> {log}')
+    else:
+        cmd = 'touch {output} &> {log}'
+    return cmd
 
-
-rule bamCoverage:
-    input:
-        bam  = rules.filterBlacklist.output,
-        index  = f'{rules.filterBlacklist.output}.bai'
-    output:
-        'bigwig/{sample}.filtered.bigwig'
-    params:
-        binSize = 50,
-    log:
-        'logs/bamCoverage/{sample}.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    threads:
-        config['threads']
-    shell:
-        'bamCoverage --bam {input.bam} --outFileName {output} '
-        '--binSize {params.binSize} --numberOfProcessors {threads} &> {log}'
-
-
-rule computeMatrixScaledGroups:
-    input:
-        expand('bigwig/{sample}.filtered.bigwig', sample=SAMPLES)
-    output:
-        scaledGZ = 'deeptools/computeMatrixGroups/matrix-scaled.gz',
-        scaled = 'deeptools/computeMatrixGroups/matrix-scaled.tab',
-        sortedRegions = 'deeptools/computeMatrixGroups/genes-scaled.bed'
-    params:
-        binSize = 50,
-        regionBodyLength = 5000,
-        upstream = 2000,
-        downstream = 2000,
-        metagene = '--metagene' if config['computeMatrixScale']['exon'] else '',
-        samplesLabel = ' '.join(SAMPLES),
-        genes = config['genome']['genes'],
-        averageType = 'mean'
-    log:
-        'logs/computeMatrixScaledGroups.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    threads:
-        config['threads']
-    shell:
-        'computeMatrix scale-regions --scoreFileName {input} '
-        '--regionsFileName {params.genes} --outFileName {output.scaledGZ} '
-        '--outFileNameMatrix {output.scaled} --skipZeros '
-        '--regionBodyLength {params.regionBodyLength} '
-        '--samplesLabel {params.samplesLabel} --binSize {params.binSize} '
-        '--averageTypeBins {params.averageType} {params.metagene} '
-        '--upstream {params.upstream} --downstream {params.downstream} '
-        '--outFileSortedRegions {output.sortedRegions} '
-        '--numberOfProcessors {threads} &> {log}'
-
-
-rule computeMatrixReferenceGroups:
-    input:
-        expand('bigwig/{sample}.filtered.bigwig', sample=SAMPLES)
-    output:
-        referenceGZ = 'deeptools/computeMatrixGroups/matrix-reference.gz',
-        reference = 'deeptools/computeMatrixGroups/matrix-reference.tab',
-        sortedRegions = 'deeptools/computeMatrixGroups/genes-reference.bed'
-    params:
-        binSize = 50,
-        upstream = 5000,
-        downstream = 5000,
-        samplesLabel = ' '.join(SAMPLES),
-        genes = config['genome']['genes'],
-        averageType = 'mean',
-        referencePoint = 'TSS'
-    log:
-        'logs/computeMatrixReferenceGroups.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    threads:
-        config['threads']
-    shell:
-        'computeMatrix reference-point --scoreFileName {input} '
-        '--regionsFileName {params.genes} --outFileName {output.referenceGZ} '
-        '--outFileNameMatrix {output.reference} --skipZeros '
-        '--samplesLabel {params.samplesLabel} --binSize {params.binSize} '
-        '--averageTypeBins {params.averageType} '
-        '--referencePoint {params.referencePoint} '
-        '--upstream {params.upstream} --downstream {params.downstream} '
-        '--outFileSortedRegions {output.sortedRegions} '
-        '--numberOfProcessors {threads} &> {log}'
-
-
-rule plotProfileGroups:
-    input:
-        'deeptools/computeMatrixGroups/matrix-{mode}.gz'
-    output:
-        plot = 'qc/deeptools/compareGroup/plotProfileGroup-{mode}.png',
-        data = 'qc/deeptools/compareGroup/plotProfileGroup-data-{mode}.tab',
-        bed = 'qc/deeptools/compareGroup/plotProfileGroup-regions-{mode}.bed'
-    params:
-        dpi = 300,
-        plotsPerRow = 2,
-        averageType = 'mean',
-        referencePoint = 'TSS'
-    log:
-        'logs/plotProfileGroups-{mode}.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    shell:
-        'plotProfile --matrixFile {input} --outFileName {output.plot} '
-        '--outFileSortedRegions {output.bed} --outFileNameData {output.data} '
-        '--dpi {params.dpi} --averageType {params.averageType} '
-        '--refPointLabel {params.referencePoint} '
-        '--numPlotsPerRow {params.plotsPerRow} &> {log}'
-
-
-rule plotHeatmapGroups:
-    input:
-        'deeptools/computeMatrixGroups/matrix-{mode}.gz'
-    output:
-        plot = 'qc/deeptools/compareGroup/plotHeatmapGroup-{mode}.png',
-        data = 'qc/deeptools/compareGroup/plotHeatmapGroup-data-{mode}.tab',
-        bed = 'qc/deeptools/compareGroup/plotHeatmapGroup-regions-{mode}.bed'
-    params:
-        dpi = 300,
-        zMax = 3,
-        zMin = -3,
-        kmeans = 3,
-        width = max(4, len(SAMPLES) * 2),
-        colorMap = 'RdBu_r',
-        averageType = 'mean',
-        referencePoint = 'TSS',
-        interpolationMethod = 'auto'
-    log:
-        'logs/plotHeatmapGroups-{mode}.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    threads:
-        config['threads']
-    shell:
-        'plotHeatmap --matrixFile {input} --outFileName {output.plot} '
-        '--outFileSortedRegions {output.bed} --outFileNameMatrix {output.data} '
-        '--interpolationMethod {params.interpolationMethod} '
-        '--dpi {params.dpi} --kmeans {params.kmeans} '
-        '--zMin {params.zMin} --zMax {params.zMax} '
-        '--colorMap {params.colorMap} --refPointLabel {params.referencePoint} '
-        '--averageTypeSummaryPlot {params.averageType} '
-        '--heatmapWidth {params.width} '
-        '--refPointLabel {params.referencePoint} &> {log}'
-
-
-rule featureCounts:
-    input:
-        bam = rules.filterBlacklist.output,
-        gtf = config['genome']['annotation']
-    output:
-        counts = 'counts/{sample}.featureCounts.txt',
-        qc = 'qc/featurecounts/{sample}.featureCounts.txt.summary'
-    params:
-        paired = '-pC' if config['paired'] else ''
-    log:
-        'logs/featureCounts/{sample}.log'
-    conda:
-        f'{ENVS}/subread.yaml'
-    threads:
-        1
-    shell:
-        '(featureCounts {params.paired} -a {input.gtf} -o {output.counts} '
-        '{input.bam} -t exon -g gene_id -T {threads} '
-        '&& mv {output.counts}.summary {output.qc}) &> {log}'
-
-
-rule mergeFeatureCounts:
-    input:
-        expand('counts/{sample}.featureCounts.txt', sample=SAMPLES)
-    output:
-        'counts/countMatrix-merged.txt'
-    params:
-        samples = SAMPLES
-    log:
-        'logs/mergeFeatureCounts.log'
-    conda:
-        f'{ENVS}/python3.yaml'
-    shell:
-        '{SCRIPTS}/mergeCounts.py {input} --samples {params.samples} '
-        '> {output} 2> {log}'
+if False:
+    rule processBlacklist:
+        input:
+            config['filtering']['blackListFileName'] if config['filtering']['blackListFileName'] else []
+        output:
+            f'genome/{BUILD}-blacklist.bed'
+        params:
+            # Max distance between features allowed for features to be merged.
+            distance = 1000
+        log:
+            f'logs/processBlacklist/{BUILD}.log'
+        conda:
+            f'{ENVS}/bedtools.yaml'
+        shell:
+            setBlacklistCommand()
 
 
 rule multiQC:
@@ -756,22 +457,14 @@ rule multiQC:
             sample=SAMPLES),
         expand('qc/fastqc/{single}.trim_fastqc.zip',
             single=RNASeq.singles()),
-        #expand('qc/deeptools/estimateReadFiltering/{sample}.txt',
-        #    sample=SAMPLES),
-        [expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
-        'qc/deeptools/plotCorrelation.tsv',
-        'qc/deeptools/plotPCA.tab',
-        'qc/deeptools/plotCoverage.info',
-        'qc/deeptools/plotCoverage.tab',
-        'qc/deeptools/compareGroup/plotProfileGroup-data-scaled.tab',
-        expand('qc/samtools/stats/{sample}.stats.txt',
-            sample=SAMPLES),
+        expand('qc/kallisto/{sample}.stdout', sample=SAMPLES),
+        expand('qc/samtools/stats/{sample}.stats.txt', sample=SAMPLES),
         expand('qc/samtools/idxstats/{sample}.idxstats.txt',
             sample=SAMPLES),
         expand('qc/samtools/flagstat/{sample}.flagstat.txt',
             sample=SAMPLES),
-        expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
-            sample=SAMPLES)] if not config['QConly'] else []
+        'qc/deeptools/plotCorrelation.tsv',
+        'qc/deeptools/plotPCA.tab'
     output:
         directory('qc/multiqc')
     log:
