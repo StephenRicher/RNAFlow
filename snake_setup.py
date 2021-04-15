@@ -67,14 +67,16 @@ def set_config(config, default, outer_key=''):
 class Samples:
 
     def __init__(self, samplesFile: str, paired: bool, sep='\s+'):
-        self.table = self.readSamples(samplesFile, sep=sep)
         self.paired = paired
+        self.table = self.readSamples(samplesFile, sep=sep)
 
 
     def readSamples(self, samplesFile, sep='\s+'):
+        usecols = ['group', 'rep', 'R1']
+        if self.paired:
+            usecols = usecols.append('R1')
         table = pd.read_table(
-            samplesFile, sep=sep, dtype={'rep': str},
-            usecols=['group', 'rep', 'R1', 'R2'])
+            samplesFile, sep=sep, dtype={'rep': str}, usecols=usecols)
 
         # Validate read file input with wildcard definitions
         if not table['group'].str.match(r'[^-\.\/]+').all():
