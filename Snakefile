@@ -30,6 +30,7 @@ default_config = {
          'transcriptome': ''          ,
          'annotation':    ''          ,
          'sequence':      ''          ,
+         'index':         None        ,
          'genes':         ''          ,},
     'cutadapt':
         {'forwardAdapter': 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA',
@@ -293,9 +294,131 @@ rule kallistoQuant:
         kallistoCmd()
 
 
+def setBlacklistCommand():
+    if config['filtering']['blackListFileName']:
+        cmd = ('bedtools merge -d {params.distance} -i {input} '
+               '> {output} 2> {log}')
+    else:
+        cmd = 'touch {output} &> {log}'
+    return cmd
+
+
+# Need to improve this by using random!
+rule sampleReads:
+    input:
+        'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
+    output:
+        'subsampled/{sample}-{read}.trim.fastq'
+    params:
+        seed = 42,
+        nReads = int(1000000 * 4)
+    log:
+        'logs/sampleReads/{sample}-{read}.log'
+    shell:
+        '(zcat {input} | head -n {params.nReads} > {output}) 2> {log}'
+
+
+def hisat2Cmd():
+    if config['paired']:
+        return ('hisat2 -x {params.index} -1 {input[0]} '
+            '-2 {input[1]} --threads {threads} '
+            '--summary-file {output.qc} > {output.sam} 2> {log}')
+    else:
+        return ('hisat2 -x {params.index} -p {threads} '
+            '-U {input[0]} --summary-file {output.qc} '
+            '> {output.sam} 2> {log}')
+
+
+def hisat2Input(wc):
+    reads = ['R1', 'R2'] if config['paired'] else ['R1']
+    return expand(
+        'subsampled/{sample}-{read}.trim.fastq',
+        sample=wc.sample, read=reads)
+
+
+rule hisat2:
+    input:
+        hisat2Input
+    output:
+        sam = pipe('subsampled/{sample}.mapped.sam'),
+        qc = 'qc/hisat2/{sample}.hisat2.txt'
+    params:
+        index = config['genome']['index']
+    log:
+        'logs/hisat2/{sample}.log'
+    conda:
+        f'{ENVS}/hisat2.yaml'
+    threads:
+        #max(1, (config['threads'] / 2) - 1)
+        max(1, config['threads'] - 1)
+    shell:
+        hisat2Cmd()
+
+
+rule fixBAM:
+    input:
+        rules.hisat2.output.sam
+    output:
+        #pipe('subsampled/{sample}.fixmate.bam')
+        'subsampled/{sample}.fixmate.bam'
+    log:
+        'logs/fixBAM/{sample}.log'
+    conda:
+        f'{ENVS}/samtools.yaml'
+    shell:
+        'samtools fixmate -O bam,level=0 -m {input} {output} &> {log}'
+
+
+rule sortBAM:
+    input:
+        rules.fixBAM.output
+    output:
+        'subsampled/{sample}.sort.bam'
+    log:
+        'logs/sortBAM/{sample}.log'
+    conda:
+        f'{ENVS}/samtools.yaml'
+    threads:
+        max(1, (config['threads'] / 2) - 1)
+    shell:
+        'samtools sort -@ {threads} {input} > {output} 2> {log}'
+
+
+rule markdupBAM:
+    input:
+        rules.sortBAM.output
+    output:
+        bam = 'subsampled/{sample}.markdup.bam',
+        qc = 'qc/deduplicate/{sample}.txt'
+    log:
+        'logs/markdupBAM/{sample}.log'
+    conda:
+        f'{ENVS}/samtools.yaml'
+    threads:
+        config['threads']
+    shell:
+        'samtools markdup -@ {threads} '
+        '-sf {output.qc} {input} {output.bam} &> {log}'
+
+
+rule indexBAM:
+    input:
+        'subsampled/{sample}.{stage}.bam'
+    output:
+        'subsampled/{sample}.{stage}.bam.bai'
+    log:
+        'logs/indexBAM/{sample}-{stage}.log'
+    conda:
+        f'{ENVS}/samtools.yaml'
+    threads:
+        min(1, (config['threads'] / 2) - 1,)
+    shell:
+        'samtools index -@ {threads} {input} &> {log}'
+
+
 rule samtoolsStats:
     input:
-        rules.kallistoQuant.output.pseudoAlign
+        rules.markdupBAM.output.bam
     output:
         'qc/samtools/stats/{sample}.stats.txt'
     group:
@@ -310,8 +433,8 @@ rule samtoolsStats:
 
 rule samtoolsIdxstats:
     input:
-        bam = rules.kallistoQuant.output.pseudoAlign,
-        index = rules.kallistoQuant.output.pseudoAlignIdx
+        bam = 'subsampled/{sample}.markdup.bam',
+        index = 'subsampled/{sample}.markdup.bam.bai'
     output:
         'qc/samtools/idxstats/{sample}.idxstats.txt'
     group:
@@ -326,7 +449,7 @@ rule samtoolsIdxstats:
 
 rule samtoolsFlagstat:
     input:
-        rules.kallistoQuant.output.pseudoAlign
+        rules.markdupBAM.output.bam
     output:
         'qc/samtools/flagstat/{sample}.flagstat.txt'
     group:
@@ -341,9 +464,9 @@ rule samtoolsFlagstat:
 
 rule multiBamSummary:
     input:
-        bams = expand('kallisto/{sample}/pseudoalignments.bam',
+        bams = expand('subsampled/{sample}.markdup.bam',
             sample=SAMPLES),
-        indexes = expand('kallisto/{sample}/pseudoalignments.bam.bai',
+        indexes = expand('subsampled/{sample}.markdup.bam.bai',
             sample=SAMPLES)
     output:
         'qc/deeptools/multiBamSummary.npz'
@@ -422,29 +545,25 @@ rule plotPCA:
         '--outFileNameData {output.data} &> {log}'
 
 
-def setBlacklistCommand():
-    if config['filtering']['blackListFileName']:
-        cmd = ('bedtools merge -d {params.distance} -i {input} '
-               '> {output} 2> {log}')
-    else:
-        cmd = 'touch {output} &> {log}'
-    return cmd
-
-if False:
-    rule processBlacklist:
-        input:
-            config['filtering']['blackListFileName'] if config['filtering']['blackListFileName'] else []
-        output:
-            f'genome/{BUILD}-blacklist.bed'
-        params:
-            # Max distance between features allowed for features to be merged.
-            distance = 1000
-        log:
-            f'logs/processBlacklist/{BUILD}.log'
-        conda:
-            f'{ENVS}/bedtools.yaml'
-        shell:
-            setBlacklistCommand()
+rule featureCounts:
+    input:
+        bam = rules.markdupBAM.output.bam,
+        gtf = config['genome']['annotation']
+    output:
+        counts = 'subsampled/{sample}.featureCounts.txt',
+        qc = 'qc/featurecounts/{sample}.featureCounts.txt.summary'
+    params:
+        paired = '-pC' if config['paired'] else ''
+    log:
+        'logs/featureCounts/{sample}.log'
+    conda:
+        f'{ENVS}/subread.yaml'
+    threads:
+        1
+    shell:
+        '(featureCounts {params.paired} -a {input.gtf} -o {output.counts} '
+        '{input.bam} -t exon -g gene_id -T {threads} '
+        '&& mv {output.counts}.summary {output.qc}) &> {log}'
 
 
 rule multiQC:
@@ -453,18 +572,20 @@ rule multiQC:
             single=RNASeq.singles()),
         expand('qc/fastq_screen/{single}.fastq_screen.txt',
             single=RNASeq.singles()) if config['fastq_screen'] else [],
-        expand('qc/cutadapt/{sample}.cutadapt.txt',
-            sample=SAMPLES),
+        expand('qc/cutadapt/{sample}.cutadapt.txt', sample=SAMPLES),
         expand('qc/fastqc/{single}.trim_fastqc.zip',
             single=RNASeq.singles()),
         expand('qc/kallisto/{sample}.stdout', sample=SAMPLES),
+        expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
         expand('qc/samtools/stats/{sample}.stats.txt', sample=SAMPLES),
         expand('qc/samtools/idxstats/{sample}.idxstats.txt',
             sample=SAMPLES),
         expand('qc/samtools/flagstat/{sample}.flagstat.txt',
             sample=SAMPLES),
         'qc/deeptools/plotCorrelation.tsv',
-        'qc/deeptools/plotPCA.tab'
+        'qc/deeptools/plotPCA.tab',
+        expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
+            sample=SAMPLES) if not config['QConly'] else [],
     output:
         directory('qc/multiqc')
     log:
