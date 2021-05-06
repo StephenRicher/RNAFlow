@@ -30,8 +30,7 @@ default_config = {
     'genome':
         {'build':         'genome'    ,
          'transcriptome': ''          ,
-         'gtf':           ''          ,
-         'bed12':         ''          ,
+         'gff3':          ''          ,
          'sequence':      ''          ,
          'index':         None        ,},
     'cutadapt':
@@ -42,7 +41,7 @@ default_config = {
          'minimumLength':   1                                 ,
          'qualityCutoff':  '0,0'                              ,
          'GCcontent':       50                                ,},
-    'fastq_screen':         None                              ,
+    'fastqScreen':         None                              ,
 }
 
 config = set_config(config, default_config)
@@ -67,13 +66,14 @@ if config['cutadapt']['minimumLength'] < 1:
 
 if config['paired']:
     assert config['strand'] in ['RF', 'FR', 'unstranded']
+    reads = ['R1', 'R2']
 else:
     assert config['strand'] in ['R', 'F', 'unstranded']
+    reads = ['R1']
 
 rule all:
     input:
-        'qc/multiqc',
-        #'counts/countMatrix-merged.txt' if not config['QConly'] else []
+        'qc/multiqc'
 
 
 rule bgzipGenome:
@@ -89,7 +89,6 @@ rule bgzipGenome:
         f'{ENVS}/tabix.yaml'
     shell:
         '(zcat -f {input} | bgzip > {output}) 2> {log}'
-
 
 
 rule indexGenome:
@@ -175,7 +174,7 @@ def cutadaptCmd():
 
 rule cutadapt:
     input:
-        lambda wc: RNASeq.path(wc.sample, ['R1', 'R2'])
+        lambda wc: RNASeq.path(wc.sample, reads)
     output:
         trimmed = cutadaptOutput(),
         qc = 'qc/cutadapt/unmod/{sample}.cutadapt.txt'
@@ -215,7 +214,7 @@ rule modifyCutadapt:
         '> {output} 2> {log}'
 
 
-if config['fastq_screen']:
+if config['fastqScreen']:
     rule fastqScreen:
         input:
             'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
@@ -223,13 +222,13 @@ if config['fastq_screen']:
             txt = 'qc/fastq_screen/{sample}-{read}.fastq_screen.txt',
             png = 'qc/fastq_screen/{sample}-{read}.fastq_screen.png'
         params:
-            fastq_screen_config = config['fastq_screen'],
+            fastq_screen_config = config['fastqScreen'],
             subset = 100000,
             aligner = 'bowtie2'
         group:
             'processFASTQ'
         log:
-            'logs/fastq_screen/{sample}-{read}.log'
+            'logs/fastqScreen/{sample}-{read}.log'
         threads:
             config['threads']
         wrapper:
@@ -337,19 +336,17 @@ rule sampleReads:
 
 def hisat2Cmd():
     if config['paired']:
-        return ('hisat2 -x {params.index} -1 {input[0]} '
-            '-2 {input[1]} --threads {threads} '
-            '--rna-strandness {params.strand} '
-            '--summary-file {output.qc} > {output.sam} 2> {log}')
+        command = 'hisat2 -1 {input[0]} -2 {input[1]} '
     else:
-        return ('hisat2 -x {params.index} -p {threads} '
-            '-U {input[0]} --summary-file {output.qc} '
-            '--rna-strandness {params.strand} '
-            '> {output.sam} 2> {log}')
+        command = 'hisat2 -U {input[0]} '
+    if config['strand'] != 'unstranded':
+        command += '--rna-strandness {params.strand} '
+    command += ('-x {params.index} --threads {threads} '
+                '--summary-file {output.qc} > {output.sam} 2> {log}')
+    return command
 
 
 def hisat2Input(wc):
-    reads = ['R1', 'R2'] if config['paired'] else ['R1']
     if config['sample'] > 0:
         return expand(
             'fastq/sampled/{sample}-{read}.trim.fastq.gz',
@@ -358,7 +355,6 @@ def hisat2Input(wc):
         return expand(
             'fastq/trimmed/{sample}-{read}.trim.fastq.gz',
             sample=wc.sample, read=reads)
-
 
 
 rule hisat2:
@@ -579,10 +575,23 @@ def getStrand():
         return 0
 
 
+rule gff3ToGTF:
+    input:
+        config['genome']['gff3']
+    output:
+        f'annotation/{config["genome"]["build"]}.gtf'
+    log:
+        'logs/gff3ToGTF.log'
+    conda:
+        f'{ENVS}/gffread.yaml'
+    shell:
+        'gffread <(zcat -f {input}) -T -o {output} &> {log}'
+
+
 rule featureCounts:
     input:
         bam = rules.markdupBAM.output.bam,
-        gtf = config['genome']['gtf']
+        gtf = rules.gff3ToGTF.output
     output:
         counts = 'aligned/{sample}.featureCounts.txt',
         qc = 'qc/featurecounts/{sample}.featureCounts.txt.summary'
@@ -600,6 +609,46 @@ rule featureCounts:
         '{input.bam} -t exon -g gene_id -T {threads} -s {params.strand} '
         '&& mv {output.counts}.summary {output.qc}) &> {log}'
 
+
+rule gff3ToGenePred:
+    input:
+        config['genome']['gff3']
+    output:
+        pipe(f'annotation/{config["genome"]["build"]}.unsorted.genePred')
+    log:
+        'logs/gff3ToGenePred.log'
+    conda:
+        f'{ENVS}/UCSCtools.yaml'
+    shell:
+        'gff3ToGenePred -geneNameAttr=gene_name {input} {output} &> {log}'
+
+
+rule sortGenePred:
+    input:
+        rules.gff3ToGenePred.output
+    output:
+        f'annotation/{config["genome"]["build"]}.genePred'
+    log:
+        'logs/sortGenePred.log'
+    conda:
+        f'{ENVS}/UCSCtools.yaml'
+    shell:
+        'sort -k2,2 -k4n,4n {input} > {output} 2> {log}'
+
+
+rule genePredToBed:
+    input:
+        rules.sortGenePred.output
+    output:
+        f'annotation/{config["genome"]["build"]}.bed12'
+    log:
+        'logs/genePredToBed.log'
+    conda:
+        f'{ENVS}/UCSCtools.yaml'
+    shell:
+        'genePredToBed {input} {output} &> {log}'
+
+
 def getBams():
     bams = expand('subsampled/{sample}.markdup.bam',
         sample=SAMPLES)
@@ -608,7 +657,7 @@ def getBams():
 
 rule readDistribution:
     input:
-        bed12 = config['genome']['bed12'],
+        bed12 = rules.genePredToBed.output,
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
@@ -624,7 +673,7 @@ rule readDistribution:
 
 rule geneBodyCoverage:
     input:
-        bed12 = config['genome']['bed12'],
+        bed12 = rules.genePredToBed.output,
         bams = expand('aligned/{sample}.markdup.bam',
             sample=SAMPLES),
         indexes = expand('aligned/{sample}.markdup.bam.bai',
@@ -646,7 +695,7 @@ rule geneBodyCoverage:
 
 rule innerDistance:
     input:
-        bed12 = config['genome']['bed12'],
+        bed12 = rules.genePredToBed.output,
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
@@ -715,7 +764,7 @@ rule readDuplication:
 
 rule junctionAnnotation:
     input:
-        bed12 = config['genome']['bed12'],
+        bed12 = rules.genePredToBed.output,
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
@@ -740,7 +789,7 @@ rule junctionAnnotation:
 
 rule junctionSaturation:
     input:
-        bed12 = config['genome']['bed12'],
+        bed12 = rules.genePredToBed.output,
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
@@ -769,7 +818,7 @@ rule junctionSaturation:
 
 rule inferExperiment:
     input:
-        bed12 = config['genome']['bed12'],
+        bed12 = rules.genePredToBed.output,
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
@@ -804,11 +853,11 @@ rule multiQC:
         expand('qc/fastqc/{single}.raw_fastqc.zip',
             single=RNASeq.singles()),
         expand('qc/fastq_screen/{single}.fastq_screen.txt',
-            single=RNASeq.singles()) if config['fastq_screen'] else [],
+            single=RNASeq.singles()) if config['fastqScreen'] else [],
         expand('qc/cutadapt/{sample}.cutadapt.txt', sample=SAMPLES),
         expand('qc/fastqc/{single}.trim_fastqc.zip',
             single=RNASeq.singles()),
-        #expand('qc/kallisto/{sample}.stdout', sample=SAMPLES),
+        expand('qc/kallisto/{sample}.stdout', sample=SAMPLES),
         expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
         expand('qc/samtools/stats/{sample}.stats.txt', sample=SAMPLES),
         expand('qc/samtools/idxstats/{sample}.idxstats.txt',
@@ -823,8 +872,8 @@ rule multiQC:
         expand('qc/rseqc/junctionSaturation/{sample}.junctionSaturation_plot.r',
             sample=SAMPLES),
         expand('qc/rseqc/readGC/{sample}.GC.xls', sample=SAMPLES),
-        #expand('qc/rseqc/readDuplication/{sample}.pos.DupRate.xls',
-        #    sample=SAMPLES),
+        expand('qc/rseqc/readDuplication/{sample}.pos.DupRate.xls',
+            sample=SAMPLES),
         expand('qc/rseqc/innerDistance/{sample}.inner_distance_freq.txt',
             sample=SAMPLES) if config['paired'] else [],
         expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
