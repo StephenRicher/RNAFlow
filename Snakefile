@@ -24,20 +24,22 @@ default_config = {
     'threads':           workflow.cores,
     'data':              ''          ,
     'paired':            ''          ,
+    'strand':            ''          ,
+    'sample':            0           ,
     'QConly':            False       ,
     'genome':
         {'build':         'genome'    ,
          'transcriptome': ''          ,
-         'annotation':    ''          ,
+         'gtf':           ''          ,
+         'bed12':         ''          ,
          'sequence':      ''          ,
-         'index':         None        ,
-         'genes':         ''          ,},
+         'index':         None        ,},
     'cutadapt':
         {'forwardAdapter': 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA',
          'reverseAdapter': 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT',
          'overlap':         3                                 ,
          'errorRate':       0.1                               ,
-         'minimumLength':   0                                 ,
+         'minimumLength':   1                                 ,
          'qualityCutoff':  '0,0'                              ,
          'GCcontent':       50                                ,},
     'fastq_screen':         None                              ,
@@ -58,6 +60,15 @@ wildcard_constraints:
 
 # Create tmpdir to ensure it is set
 os.makedirs(config['tmpdir'], exist_ok=True)
+
+# Minimum length must be atleast 1 (if 0 this break seqkt)
+if config['cutadapt']['minimumLength'] < 1:
+    config['cutadapt']['minimumLength'] = 1
+
+if config['paired']:
+    assert config['strand'] in ['RF', 'FR', 'unstranded']
+else:
+    assert config['strand'] in ['R', 'F', 'unstranded']
 
 rule all:
     input:
@@ -255,35 +266,39 @@ rule buildKallistoIndex:
 def kallistoCmd():
     if config['paired']:
         return ('kallisto quant -i {input.index} -o kallisto/{wildcards.sample}/ '
-                '--genomebam --gtf {input.gtf} --chromosomes {input.chromSizes} '
-                '-b {params.bootstraps} {input.reads} &> {log} '
+                '-b {params.bootstraps} {params.strand} {input.reads} &> {log} '
                 '&& cp {log} {output.qc}')
     else:
         return ('kallisto quant -i {input.index} -o kallisto/{wildcards.sample}/ '
-                '--genomebam --gtf {input.gtf} --chromosomes {input.chromSizes} '
-                '-b {params.bootstraps} '
+                '-b {params.bootstraps} {params.strand} '
                 '--single -l {params.fragmentLength} -s {params.fragmentSD} '
                 '--threads {threads} {input.reads} &> {log} '
                 '&& cp {log} {output.qc}')
 
 
+def getKallistoStrand():
+    if config['strand'] in ['F', 'FR']:
+        return '--fr-stranded'
+    elif config['strand'] in ['R', 'RF']:
+        return '--rf-stranded'
+    else:
+        return ''
+
+
 rule kallistoQuant:
     input:
         index = rules.buildKallistoIndex.output,
-        reads = rules.cutadapt.output.trimmed,
-        gtf = config['genome']['annotation'],
-        chromSizes = rules.getChromSizes.output
+        reads = rules.cutadapt.output.trimmed
     output:
         qc = 'qc/kallisto/{sample}.stdout',
         abundancesH5 = 'kallisto/{sample}/abundance.h5',
         abundancesTSV = 'kallisto/{sample}/abundance.tsv',
-        runInfo = 'kallisto/{sample}/run_info.json',
-        pseudoAlign = 'kallisto/{sample}/pseudoalignments.bam',
-        pseudoAlignIdx = 'kallisto/{sample}/pseudoalignments.bam.bai'
+        runInfo = 'kallisto/{sample}/run_info.json'
     params:
-        bootstraps = 30,
+        bootstraps = 100,
         fragmentLength = 200,
-        fragmentSD = 2
+        fragmentSD = 2,
+        strand = getKallistoStrand()
     log:
         'logs/kallistoQuant/{sample}.log'
     conda:
@@ -303,47 +318,58 @@ def setBlacklistCommand():
     return cmd
 
 
-# Need to improve this by using random!
 rule sampleReads:
     input:
         'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
     output:
-        'subsampled/{sample}-{read}.trim.fastq'
+        'fastq/sampled/{sample}-{read}.trim.fastq.gz'
     params:
         seed = 42,
-        nReads = int(1000000 * 4)
+        nReads = config['sample']
     log:
         'logs/sampleReads/{sample}-{read}.log'
+    conda:
+        f'{ENVS}/seqtk.yaml'
     shell:
-        '(zcat {input} | head -n {params.nReads} > {output}) 2> {log}'
+        '(seqtk sample -s {params.seed} {input} {params.nReads} '
+        '| gzip > {output}) 2> {log}'
 
 
 def hisat2Cmd():
     if config['paired']:
         return ('hisat2 -x {params.index} -1 {input[0]} '
             '-2 {input[1]} --threads {threads} '
+            '--rna-strandness {params.strand} '
             '--summary-file {output.qc} > {output.sam} 2> {log}')
     else:
         return ('hisat2 -x {params.index} -p {threads} '
             '-U {input[0]} --summary-file {output.qc} '
+            '--rna-strandness {params.strand} '
             '> {output.sam} 2> {log}')
 
 
 def hisat2Input(wc):
     reads = ['R1', 'R2'] if config['paired'] else ['R1']
-    return expand(
-        'subsampled/{sample}-{read}.trim.fastq',
-        sample=wc.sample, read=reads)
+    if config['sample'] > 0:
+        return expand(
+            'fastq/sampled/{sample}-{read}.trim.fastq.gz',
+            sample=wc.sample, read=reads)
+    else:
+        return expand(
+            'fastq/trimmed/{sample}-{read}.trim.fastq.gz',
+            sample=wc.sample, read=reads)
+
 
 
 rule hisat2:
     input:
         hisat2Input
     output:
-        sam = pipe('subsampled/{sample}.mapped.sam'),
+        sam = pipe('aligned/{sample}.mapped.sam'),
         qc = 'qc/hisat2/{sample}.hisat2.txt'
     params:
-        index = config['genome']['index']
+        index = config['genome']['index'],
+        strand = config['strand']
     log:
         'logs/hisat2/{sample}.log'
     conda:
@@ -359,27 +385,27 @@ rule fixBAM:
     input:
         rules.hisat2.output.sam
     output:
-        #pipe('subsampled/{sample}.fixmate.bam')
-        'subsampled/{sample}.fixmate.bam'
+        temp('aligned/{sample}.fixmate.bam')
     log:
         'logs/fixBAM/{sample}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     shell:
-        'samtools fixmate -O bam,level=0 -m {input} {output} &> {log}'
+        #'samtools fixmate -O bam,level=0 -m {input} {output} &> {log}'
+        'samtools fixmate -O bam -m {input} {output} &> {log}'
 
 
 rule sortBAM:
     input:
         rules.fixBAM.output
     output:
-        'subsampled/{sample}.sort.bam'
+        temp('aligned/{sample}.sort.bam')
     log:
         'logs/sortBAM/{sample}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     threads:
-        max(1, (config['threads'] / 2) - 1)
+        config['threads']
     shell:
         'samtools sort -@ {threads} {input} > {output} 2> {log}'
 
@@ -388,7 +414,7 @@ rule markdupBAM:
     input:
         rules.sortBAM.output
     output:
-        bam = 'subsampled/{sample}.markdup.bam',
+        bam = 'aligned/{sample}.markdup.bam',
         qc = 'qc/deduplicate/{sample}.txt'
     log:
         'logs/markdupBAM/{sample}.log'
@@ -403,15 +429,15 @@ rule markdupBAM:
 
 rule indexBAM:
     input:
-        'subsampled/{sample}.{stage}.bam'
+        'aligned/{sample}.{stage}.bam'
     output:
-        'subsampled/{sample}.{stage}.bam.bai'
+        'aligned/{sample}.{stage}.bam.bai'
     log:
         'logs/indexBAM/{sample}-{stage}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     threads:
-        min(1, (config['threads'] / 2) - 1,)
+        max(1, (config['threads'] / 2) - 1,)
     shell:
         'samtools index -@ {threads} {input} &> {log}'
 
@@ -433,14 +459,14 @@ rule samtoolsStats:
 
 rule samtoolsIdxstats:
     input:
-        bam = 'subsampled/{sample}.markdup.bam',
-        index = 'subsampled/{sample}.markdup.bam.bai'
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
     output:
         'qc/samtools/idxstats/{sample}.idxstats.txt'
     group:
         'samQC'
     log:
-        'logs/samtools_idxstats/{sample}.log'
+        'logs/samtoolsIdxstats/{sample}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     shell:
@@ -464,9 +490,9 @@ rule samtoolsFlagstat:
 
 rule multiBamSummary:
     input:
-        bams = expand('subsampled/{sample}.markdup.bam',
+        bams = expand('aligned/{sample}.markdup.bam',
             sample=SAMPLES),
-        indexes = expand('subsampled/{sample}.markdup.bam.bai',
+        indexes = expand('aligned/{sample}.markdup.bam.bai',
             sample=SAMPLES)
     output:
         'qc/deeptools/multiBamSummary.npz'
@@ -474,7 +500,6 @@ rule multiBamSummary:
         binSize = 10000,
         distanceBetweenBins = 0,
         labels = ' '.join(SAMPLES),
-        extendReads = 150
     log:
         'logs/multiBamSummary.log'
     conda:
@@ -485,7 +510,7 @@ rule multiBamSummary:
         'multiBamSummary bins --bamfiles {input.bams} --outFileName {output} '
         '--binSize {params.binSize} --labels {params.labels} '
         '--distanceBetweenBins {params.distanceBetweenBins} '
-        '--extendReads {params.extendReads} --numberOfProcessors {threads} &> {log}'
+        '--numberOfProcessors {threads} &> {log}'
 
 
 rule plotCorrelation:
@@ -545,15 +570,25 @@ rule plotPCA:
         '--outFileNameData {output.data} &> {log}'
 
 
+def getStrand():
+    if config['strand'] in ['F', 'FR']:
+        return 1
+    elif config['strand'] in ['R', 'RF']:
+        return 2
+    else:
+        return 0
+
+
 rule featureCounts:
     input:
         bam = rules.markdupBAM.output.bam,
-        gtf = config['genome']['annotation']
+        gtf = config['genome']['gtf']
     output:
-        counts = 'subsampled/{sample}.featureCounts.txt',
+        counts = 'aligned/{sample}.featureCounts.txt',
         qc = 'qc/featurecounts/{sample}.featureCounts.txt.summary'
     params:
-        paired = '-pC' if config['paired'] else ''
+        paired = '-pC' if config['paired'] else '',
+        strand = getStrand()
     log:
         'logs/featureCounts/{sample}.log'
     conda:
@@ -562,8 +597,206 @@ rule featureCounts:
         1
     shell:
         '(featureCounts {params.paired} -a {input.gtf} -o {output.counts} '
-        '{input.bam} -t exon -g gene_id -T {threads} '
+        '{input.bam} -t exon -g gene_id -T {threads} -s {params.strand} '
         '&& mv {output.counts}.summary {output.qc}) &> {log}'
+
+def getBams():
+    bams = expand('subsampled/{sample}.markdup.bam',
+        sample=SAMPLES)
+    return ','.join(bams)
+
+
+rule readDistribution:
+    input:
+        bed12 = config['genome']['bed12'],
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
+    output:
+        'qc/rseqc/readDistribution/{sample}.txt'
+    log:
+        'logs/readDistribution/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'read_distribution.py -r {input.bed12} -i {input.bam} '
+        '> {output} 2> {log} '
+
+
+rule geneBodyCoverage:
+    input:
+        bed12 = config['genome']['bed12'],
+        bams = expand('aligned/{sample}.markdup.bam',
+            sample=SAMPLES),
+        indexes = expand('aligned/{sample}.markdup.bam.bai',
+            sample=SAMPLES)
+    output:
+        'qc/rseqc/geneBodyCoverage/{sample}.txt',
+        'qc/rseqc/geneBodyCoverage/{sample}.pdf'
+    params:
+        bams = getBams(),
+        prefix = lambda wc: f'qc/rseqc/geneBodyCoverage/{wc.sample}'
+    log:
+        'logs/geneBodyCoverage/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'geneBody_coverage.py -r {input.bed12} -i {params.bams} '
+        '-o {params.prefix} &> {log} '
+
+
+rule innerDistance:
+    input:
+        bed12 = config['genome']['bed12'],
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
+    output:
+        'qc/rseqc/innerDistance/{sample}.inner_distance_freq.txt',
+        'qc/rseqc/innerDistance/{sample}.inner_distance_plot.pdf',
+        'qc/rseqc/innerDistance/{sample}.inner_distance_plot.r',
+        'qc/rseqc/innerDistance/{sample}.inner_distance.txt'
+    params:
+        lowerBound = -250,
+        upperBound = 250,
+        sampleSize = 1000000,
+        stepSize = 5,
+        mapQual = 30,
+        prefix = lambda wc: f'qc/rseqc/innerDistance/{wc.sample}'
+    log:
+        'logs/innerDistance/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'inner_distance.py -r {input.bed12} -i {input.bam} '
+        '-l {params.lowerBound} -u {params.upperBound} '
+        '-k {params.sampleSize} -s {params.stepSize} '
+        '-q {params.mapQual} -o {params.prefix} &> {log} '
+
+
+rule readGC:
+    input:
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
+    output:
+        'qc/rseqc/readGC/{sample}.GC.xls',
+        'qc/rseqc/readGC/{sample}.GC_plot.r',
+        'qc/rseqc/readGC/{sample}.GC_plot.pdf'
+    params:
+        mapQual = 30,
+        prefix = lambda wc: f'qc/rseqc/readGC/{wc.sample}'
+    log:
+        'logs/readGC/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'read_GC.py -i {input.bam} '
+        '-q {params.mapQual} -o {params.prefix} &> {log} '
+
+
+rule readDuplication:
+    input:
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
+    output:
+        'qc/rseqc/readDuplication/{sample}.pos.DupRate.xls',
+        'qc/rseqc/readDuplication/{sample}.seq.DupRate.xls',
+        'qc/rseqc/readDuplication/{sample}.DupRate_plot.r',
+        'qc/rseqc/readDuplication/{sample}.DupRate_plot.pdf'
+    params:
+        mapQual = 30,
+        prefix = lambda wc: f'qc/rseqc/readDuplication/{wc.sample}'
+    log:
+        'logs/readDuplication/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'read_duplication.py -i {input.bam} '
+        '-q {params.mapQual} -o {params.prefix} &> {log}'
+
+
+rule junctionAnnotation:
+    input:
+        bed12 = config['genome']['bed12'],
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
+    output:
+        expand('qc/rseqc/junctionAnnotation/{{sample}}.{ext}',
+            ext=['junction.bed', 'junction_plot.r',
+                 'splice_events.pdf', 'junction.Interact.bed',
+                 'junction.xls', 'splice_junction.pdf']),
+        txt = 'qc/rseqc/junctionAnnotation/{sample}.txt'
+    params:
+        minIntron = 50,
+        mapQual = 30,
+        prefix = lambda wc: f'qc/rseqc/junctionAnnotation/{wc.sample}'
+    log:
+        'logs/junctionAnnotation/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'junction_annotation.py -r {input.bed12} -i {input.bam} '
+        '-q {params.mapQual} -m {params.minIntron} -o {params.prefix} '
+        '&> {log} && cp {log} {output.txt}'
+
+
+rule junctionSaturation:
+    input:
+        bed12 = config['genome']['bed12'],
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
+    output:
+        expand('qc/rseqc/junctionSaturation/{{sample}}.{ext}',
+            ext=['junctionSaturation_plot.r',
+                 'junctionSaturation_plot.pdf'])
+    params:
+        lowerBound = 5,
+        upperBound = 100,
+        percentStep = 5,
+        minIntron = 50,
+        minSpliceRead = 1,
+        mapQual = 30,
+        prefix = lambda wc: f'qc/rseqc/junctionSaturation/{wc.sample}'
+    log:
+        'logs/junctionSaturation/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'junction_saturation.py -r {input.bed12} -i {input.bam} '
+        '-l {params.lowerBound} -u {params.upperBound} '
+        '-s {params.percentStep} -m {params.minIntron} '
+        '-q {params.mapQual} -v {params.minSpliceRead} '
+        '-o {params.prefix} &> {log}'
+
+
+rule inferExperiment:
+    input:
+        bed12 = config['genome']['bed12'],
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
+    output:
+        'qc/rseqc/inferExperiment/{sample}.txt'
+    log:
+        'logs/inferExperiment/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'infer_experiment.py -r {input.bed12} -i {input.bam} '
+        '> {output} 2> {log} '
+
+
+rule bamStat:
+    input:
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai'
+    output:
+        'qc/rseqc/bamStat/{sample}.txt'
+    params:
+        mapQual = 30,
+    log:
+        'logs/readDuplication/{sample}.log'
+    conda:
+        f'{ENVS}/rseqc.yaml'
+    shell:
+        'bam_stat.py -i {input.bam} -q {params.mapQual} > {output} 2> {log}'
 
 
 rule multiQC:
@@ -575,7 +808,7 @@ rule multiQC:
         expand('qc/cutadapt/{sample}.cutadapt.txt', sample=SAMPLES),
         expand('qc/fastqc/{single}.trim_fastqc.zip',
             single=RNASeq.singles()),
-        expand('qc/kallisto/{sample}.stdout', sample=SAMPLES),
+        #expand('qc/kallisto/{sample}.stdout', sample=SAMPLES),
         expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
         expand('qc/samtools/stats/{sample}.stats.txt', sample=SAMPLES),
         expand('qc/samtools/idxstats/{sample}.idxstats.txt',
@@ -584,6 +817,16 @@ rule multiQC:
             sample=SAMPLES),
         'qc/deeptools/plotCorrelation.tsv',
         'qc/deeptools/plotPCA.tab',
+        expand('qc/rseqc/{tool}/{sample}.txt', sample=SAMPLES,
+            tool=['inferExperiment', 'readDistribution',
+                  'junctionAnnotation', 'bamStat']),#, 'geneBodyCoverage']),
+        expand('qc/rseqc/junctionSaturation/{sample}.junctionSaturation_plot.r',
+            sample=SAMPLES),
+        expand('qc/rseqc/readGC/{sample}.GC.xls', sample=SAMPLES),
+        #expand('qc/rseqc/readDuplication/{sample}.pos.DupRate.xls',
+        #    sample=SAMPLES),
+        expand('qc/rseqc/innerDistance/{sample}.inner_distance_freq.txt',
+            sample=SAMPLES) if config['paired'] else [],
         expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
             sample=SAMPLES) if not config['QConly'] else [],
     output:

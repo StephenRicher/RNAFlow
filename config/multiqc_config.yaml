@@ -13,9 +13,12 @@ module_order:
     - fastq_screen:
         name: 'FastQ Screen (trimmed sequences)'
     - bowtie2
-    - qualimap
+    - rseqc
+    - kallisto
     - samtools
+    - deeptools
     - featureCounts
+
 
 extra_fn_clean_exts:
     - '.'
