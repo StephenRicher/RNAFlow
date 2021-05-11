@@ -25,8 +25,6 @@ default_config = {
     'data':              ''          ,
     'paired':            ''          ,
     'strand':            ''          ,
-    'sample':            0           ,
-    'QConly':            False       ,
     'genome':
         {'build':         'genome'    ,
          'transcriptome': ''          ,
@@ -41,7 +39,8 @@ default_config = {
          'qualityCutoff':  '0,0'                              ,
          'GCcontent':       50                                ,},
     'misc':
-        {'inferExperimentSampleSize': 200000                 ,},
+        {'inferExperimentSampleSize': 200000                 ,
+         'sample'                   : 0                      ,},
     'fastqScreen':         None                              ,
     'multiQCconfig':       None                              ,
 }
@@ -283,7 +282,7 @@ rule sampleReads:
         'fastq/sampled/{sample}-{read}.trim.fastq.gz'
     params:
         seed = 42,
-        nReads = config['sample']
+        nReads = config['misc']['sample']
     log:
         'logs/sampleReads/{sample}-{read}.log'
     conda:
@@ -306,7 +305,7 @@ def hisat2Cmd():
 
 
 def hisat2Input(wc):
-    if config['sample'] > 0:
+    if config['misc']['sample'] > 0:
         return expand(
             'fastq/sampled/{sample}-{read}.trim.fastq.gz',
             sample=wc.sample, read=reads)
@@ -841,7 +840,7 @@ rule multiQC:
         expand('qc/rseqc/innerDistance/{sample}.inner_distance_freq.txt',
             sample=SAMPLES) if config['paired'] else [],
         expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
-            sample=SAMPLES) if not config['QConly'] else [],
+            sample=SAMPLES),
     output:
         directory('qc/multiqc')
     params:
