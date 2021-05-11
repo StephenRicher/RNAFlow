@@ -1,26 +1,28 @@
-# Specify output directory - either absolute path or relative to Snakefile.
-# If using relative paths for subsequent files, these should be relative to
-# this workding directory.
+# Specify output directory (path relative to execution directory).
+# All other paths in config file are relative to this working directory.
 workdir: example/analysis/
 
-tmpdir: example/analysis/
-
+# Path to table describing data paths.
 data:  ../config/samples.tsv
 
-fastqScreen: ../config/fastq_screen.config
-
-sample: 0
+# Set True if paired sequences provided.
 paired: False
+
+# For paired-end stranded set to either - RF or FR
+# For single-end stranded set to either - R or F
+# For unstranded set to 'unstranded'
 strand: R
 
+# Set genome configuration.
 genome:
     build: BDGP6
     transcriptome:
         - ../genome/Drosophila_melanogaster.BDGP6.32.cdna.all.fa.gz
         - ../genome/Drosophila_melanogaster.BDGP6.32.ncrna.fa.gz
-    index: ../genome/index/BDGP6_tran
+    index: ../genome/index/BDGP6_tran # Prefix for hisat2 index files
     gff3: ../genome/Drosophila_melanogaster.BDGP6.32.104.gff3.gz
 
+# Cutadapt parameters - see https://cutadapt.readthedocs.io/en/stable/guide.html
 cutadapt:
     forwardAdapter: AGATCGGAAGAGCACACGTCTGAACTCCAGTCA
     reverseAdapter: AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT
@@ -30,10 +32,19 @@ cutadapt:
     qualityCutoff:  0,0
     GCcontent:      43
 
-
 misc:
-    inferExperimentSampleSize: 75000 # Reduce for downsampled dataset
+    # Downsample to N reads before alignment. Useful if aligning for QC only.
+    # Set to 0 for no downsampling.
+    sample:                    0
+    # Reduce for example dataset. Not usually required.
+    inferExperimentSampleSize: 75000
 
-QConly: False
-
+# Custom configuration file for multiQC.
 multiQCconfig: ../config/multiqc_config.yaml
+
+# Configuration file of paths to genome indexes for FastQ Screen.
+# See template in example/config/fastqScreen.config.
+fastqScreen:
+
+# Set directory for temporary file. Currently unused.
+tmpdir: example/analysis/
