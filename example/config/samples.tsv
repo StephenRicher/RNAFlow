@@ -1,0 +1,5 @@
+group   rep R1
+HFD 1   ../data/HFD-1-chr3L-subsample-R1.fastq.gz
+HFD 2   ../data/HFD-2-chr3L-subsample-R1.fastq.gz
+HSD 1   ../data/HSD-1-chr3L-subsample-R1.fastq.gz
+HSD 2   ../data/HSD-2-chr3L-subsample-R1.fastq.gz

@@ -1,0 +1,24 @@
+module_order:
+    - fastqc:
+        name: 'FastQC (raw)'
+        path_filters:
+            - '*.raw_fastqc.zip'
+    - cutadapt
+    - fastqc:
+        name: 'FastQC (trimmed)'
+        info: 'This section shows FastQC results after adapter trimming.'
+        target: ''
+        path_filters:
+            - '*.trim_fastqc.zip'
+    - fastq_screen:
+        name: 'FastQ Screen (trimmed sequences)'
+    - bowtie2
+    - rseqc
+    - kallisto
+    - samtools
+    - deeptools
+    - featureCounts
+
+
+extra_fn_clean_exts:
+    - '.'
