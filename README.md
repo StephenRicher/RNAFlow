@@ -7,10 +7,10 @@ The pipeline utilises the workflow management system Snakemake and automatically
 
  * [FastQC](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/) - A quality control tool for high throughput sequence data.
  * [FastQ Screen](https://www.bioinformatics.babraham.ac.uk/projects/fastq_screen/) - A tool to screen for species composition in FASTQ sequences.
- * [Cutadapt](https://cutadapt.readthedocs.io/en/stable/) - A tool to remove adapter sequences, primers, poly-A tails and others from high-throughput sequencing reads.
+ * [Cutadapt](https://cutadapt.readthedocs.io/en/stable/) - Remove adapter sequences, primers, poly-A tails and others from high-throughput sequencing data.
  * [Kallisto](https://pachterlab.github.io/kallisto/about) - Quantify abundances of transcripts from RNA-Seq data using pseudoalignment.
  * [HISAT2](https://daehwankimlab.github.io/hisat2/manual/) - A fast and sensitive spliced aligner.
- * [Samtools](http://www.htslib.org/doc/samtools.html) - A suite of programs for interacting with high-throughput sequencing data in SAM, BAM and CRAM formats.
+ * [Samtools](http://www.htslib.org/doc/samtools.html) - Interact with high-throughput sequencing data in SAM, BAM and CRAM formats.
  * [deepTools](https://deeptools.readthedocs.io/en/develop/) - Tools for analysis and quality control of high-throughput sequencing data.
  * [RSeQC](http://rseqc.sourceforge.net/) - Comprehensively evaluate and quality check high-throughput RNA sequencing data.
  * [featureCounts](http://subread.sourceforge.net/) - Count reads to genomic features such as genes, exons, promoters and genomic bins.
