@@ -31,8 +31,7 @@ default_config = {
         {'build':         'genome'    ,
          'transcriptome': ''          ,
          'gff3':          ''          ,
-         'sequence':      ''          ,
-         'index':         None        ,},
+         'index':         ''          ,},
     'cutadapt':
         {'forwardAdapter': 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCA',
          'reverseAdapter': 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT',
@@ -41,7 +40,10 @@ default_config = {
          'minimumLength':   1                                 ,
          'qualityCutoff':  '0,0'                              ,
          'GCcontent':       50                                ,},
+    'misc':
+        {'inferExperimentSampleSize': 200000                 ,},
     'fastqScreen':         None                              ,
+    'multiQCconfig':       None                              ,
 }
 
 config = set_config(config, default_config)
@@ -74,49 +76,6 @@ else:
 rule all:
     input:
         'qc/multiqc'
-
-
-rule bgzipGenome:
-    input:
-        config['genome']['sequence']
-    output:
-        f'genome/{config["genome"]["build"]}.fa.gz'
-    group:
-        'prepareGenome'
-    log:
-        'logs/bgzipGenome.log'
-    conda:
-        f'{ENVS}/tabix.yaml'
-    shell:
-        '(zcat -f {input} | bgzip > {output}) 2> {log}'
-
-
-rule indexGenome:
-    input:
-        rules.bgzipGenome.output
-    output:
-        f'{rules.bgzipGenome.output}.fai'
-    group:
-        'prepareGenome'
-    log:
-        'logs/indexGenome.log'
-    conda:
-        f'{ENVS}/samtools.yaml'
-    shell:
-        'samtools faidx {input} &> {log}'
-
-
-rule getChromSizes:
-    input:
-        rules.indexGenome.output
-    output:
-        f'genome/{config["genome"]["build"]}.chrom.sizes'
-    group:
-        'prepareGenome'
-    log:
-        'logs/getChromSizes.log'
-    shell:
-        'cut -f 1,2 {input} > {output} 2> {log}'
 
 
 rule fastqc:
@@ -603,7 +562,7 @@ rule featureCounts:
     conda:
         f'{ENVS}/subread.yaml'
     threads:
-        1
+        config['threads']
     shell:
         '(featureCounts {params.paired} -a {input.gtf} -o {output.counts} '
         '{input.bam} -t exon -g gene_id -T {threads} -s {params.strand} '
@@ -649,12 +608,6 @@ rule genePredToBed:
         'genePredToBed {input} {output} &> {log}'
 
 
-def getBams():
-    bams = expand('subsampled/{sample}.markdup.bam',
-        sample=SAMPLES)
-    return ','.join(bams)
-
-
 rule readDistribution:
     input:
         bed12 = rules.genePredToBed.output,
@@ -671,6 +624,11 @@ rule readDistribution:
         '> {output} 2> {log} '
 
 
+def getBams():
+    bams = expand('aligned/{sample}.markdup.bam', sample=SAMPLES)
+    return ','.join(bams)
+
+
 rule geneBodyCoverage:
     input:
         bed12 = rules.genePredToBed.output,
@@ -679,13 +637,14 @@ rule geneBodyCoverage:
         indexes = expand('aligned/{sample}.markdup.bam.bai',
             sample=SAMPLES)
     output:
-        'qc/rseqc/geneBodyCoverage/{sample}.txt',
-        'qc/rseqc/geneBodyCoverage/{sample}.pdf'
+        'qc/rseqc/geneBodyCoverage/data.geneBodyCoverage.txt',
+        'qc/rseqc/geneBodyCoverage/data.geneBodyCoverage.r',
+        'qc/rseqc/geneBodyCoverage/data.geneBodyCoverage.curves.pdf'
     params:
         bams = getBams(),
-        prefix = lambda wc: f'qc/rseqc/geneBodyCoverage/{wc.sample}'
+        prefix = lambda wc: f'qc/rseqc/geneBodyCoverage/data'
     log:
-        'logs/geneBodyCoverage/{sample}.log'
+        'logs/geneBodyCoverage.log'
     conda:
         f'{ENVS}/rseqc.yaml'
     shell:
@@ -757,6 +716,8 @@ rule readDuplication:
         'logs/readDuplication/{sample}.log'
     conda:
         f'{ENVS}/rseqc.yaml'
+    threads:
+        config['threads']
     shell:
         'read_duplication.py -i {input.bam} '
         '-q {params.mapQual} -o {params.prefix} &> {log}'
@@ -823,12 +784,14 @@ rule inferExperiment:
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
         'qc/rseqc/inferExperiment/{sample}.txt'
+    params:
+        sampleSize = config['misc']['inferExperimentSampleSize']
     log:
         'logs/inferExperiment/{sample}.log'
     conda:
         f'{ENVS}/rseqc.yaml'
     shell:
-        'infer_experiment.py -r {input.bed12} -i {input.bam} '
+        'infer_experiment.py -r {input.bed12} -i {input.bam} -s 75000 '
         '> {output} 2> {log} '
 
 
@@ -867,8 +830,9 @@ rule multiQC:
         'qc/deeptools/plotCorrelation.tsv',
         'qc/deeptools/plotPCA.tab',
         expand('qc/rseqc/{tool}/{sample}.txt', sample=SAMPLES,
-            tool=['inferExperiment', 'readDistribution',
-                  'junctionAnnotation', 'bamStat']),#, 'geneBodyCoverage']),
+            tool=['readDistribution', 'junctionAnnotation',
+                  'bamStat', 'inferExperiment']),
+        'qc/rseqc/geneBodyCoverage/data.geneBodyCoverage.txt',
         expand('qc/rseqc/junctionSaturation/{sample}.junctionSaturation_plot.r',
             sample=SAMPLES),
         expand('qc/rseqc/readGC/{sample}.GC.xls', sample=SAMPLES),
@@ -880,11 +844,11 @@ rule multiQC:
             sample=SAMPLES) if not config['QConly'] else [],
     output:
         directory('qc/multiqc')
+    params:
+        config = f'--config {config["multiQCconfig"]}' if config["multiQCconfig"] else ''
     log:
         'logs/multiqc/multiqc.log'
     conda:
         f'{ENVS}/multiqc.yaml'
     shell:
-        'multiqc --outdir {output} '
-        '--force --config {BASE}/config/multiqc_config.yaml {input} '
-        '&> {log}'
+        'multiqc --outdir {output} --force {params.config} {input} &> {log}'
