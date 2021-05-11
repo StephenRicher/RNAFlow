@@ -1,4 +1,5 @@
 analysis/
-seqmonk/
 .snakemake/
+example/analysis
+example/.snakemake
 __pycache__/
