@@ -15,6 +15,7 @@ The pipeline utilises the workflow management system Snakemake and automatically
   * [Installation](#installation)
   * [Configuration](#configuration)
   * [Usage](#usage)
+     * [Cluster execution](#cluster-execution)
   * [Output](#output)
      * [MultiQC report](#multiqc-report)
   * [References](#references)
@@ -26,10 +27,10 @@ RNA-Flow works with Python >=3.6 and requires [Snakemake](https://snakemake.read
 The RNA-Flow repository can be downloaded from GitHub as follows:
 
 ```bash
-$ git clone https://github.com/StephenRicher/RNA-Flow
+$ git clone https://github.com/StephenRicher/RNA-Flow.git
 ```
 
-## Configuring RNA-Flow
+## Configuration
 The RNA-Flow pipeline is fully controlled through a single configuration file that describes parameter settings and paths to relevant files in the system.
 RNA-Flow is bundled with a downsampled RNA-seq dataset from *Drosophila melanogaster* (chr3L) ([Hemphill et al., 2018](https://doi.org/10.1534/g3.117.300397)) to test and serve as a template for configuring other datasets.
 The configuration file for this example dataset is shown below and can be found at `example/config/config.yaml`.
@@ -94,7 +95,6 @@ tmpdir: example/analysis/
 ```
 
 ## Usage
-
 Once Snakemake is installed the example dataset can be processed using the following command.
 This command should be run from the RNA-Flow base directory, containing the Snakefile.
 
@@ -122,6 +122,5 @@ Consult the official Snakemake documentation [here](https://snakemake.readthedoc
 
 RNA-Flow utilises MultiQC to aggregate the QC and metric report across all samples and all compatible tools used in the pipeline. An example MultiQC report produced by RNA-Flow is shown [here](./README_files/multiqc_report.html).  
 
-
-###### References
+## References
 Hemphill, W., Rivera, O. and Talbert, M., 2018. RNA-sequencing of Drosophila melanogaster head tissue on high-sugar and high-fat diets. G3: Genes, Genomes, Genetics [Online]. Available from: [https://doi.org/10.1534/g3.117.300397](https://doi.org/10.1534/g3.117.300397).
