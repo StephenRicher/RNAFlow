@@ -74,7 +74,7 @@ else:
 
 rule all:
     input:
-        'qc/multiqc'
+        'qc/multiQC'
 
 
 rule fastqc:
@@ -177,8 +177,8 @@ if config['fastqScreen']:
         input:
             'fastq/trimmed/{sample}-{read}.trim.fastq.gz'
         output:
-            txt = 'qc/fastq_screen/{sample}-{read}.fastq_screen.txt',
-            png = 'qc/fastq_screen/{sample}-{read}.fastq_screen.png'
+            txt = 'qc/fastqScreen/{sample}-{read}.fastq_screen.txt',
+            png = 'qc/fastqScreen/{sample}-{read}.fastq_screen.png'
         params:
             fastq_screen_config = config['fastqScreen'],
             subset = 100000,
@@ -369,7 +369,7 @@ rule markdupBAM:
         rules.sortBAM.output
     output:
         bam = 'aligned/{sample}.markdup.bam',
-        qc = 'qc/deduplicate/{sample}.txt'
+        qc = 'qc/samtools/markdup/{sample}.txt'
     log:
         'logs/markdupBAM/{sample}.log'
     conda:
@@ -404,7 +404,7 @@ rule samtoolsStats:
     group:
         'samQC'
     log:
-        'logs/samtools_stats/{sample}.log'
+        'logs/samtoolsStats/{sample}.log'
     conda:
         f'{ENVS}/samtools.yaml'
     shell:
@@ -449,7 +449,7 @@ rule multiBamSummary:
         indexes = expand('aligned/{sample}.markdup.bam.bai',
             sample=SAMPLES)
     output:
-        'qc/deeptools/multiBamSummary.npz'
+        'qc/deepTools/multiBamSummary.npz'
     params:
         binSize = 10000,
         distanceBetweenBins = 0,
@@ -471,8 +471,8 @@ rule plotCorrelation:
     input:
         rules.multiBamSummary.output
     output:
-        plot = 'qc/deeptools/plotCorrelation.png',
-        matrix = 'qc/deeptools/plotCorrelation.tsv'
+        plot = 'qc/deepTools/plotCorrelation.png',
+        matrix = 'qc/deepTools/plotCorrelation.tsv'
     params:
         corMethod = 'pearson',
         colorMap = 'viridis',
@@ -488,7 +488,7 @@ rule plotCorrelation:
         '--plotFile {output.plot} --outFileCorMatrix {output.matrix} &> {log}'
 
 
-def setColours(groups):
+def setColours(samples):
     """ Find group and assign to specific colour. """
     colours = ''
     colourPool = ['#E69F00', '#56B4E9', '#009E73', '#F0E442',
@@ -496,7 +496,8 @@ def setColours(groups):
     # Add double quotes for compatibility with shell
     colourPool = [f'"{colour}"' for colour in colourPool]
     usedColours = {}
-    for group in groups:
+    for sample in samples:
+        group = sample.split('-')[0]
         if group not in usedColours:
             usedColours[group] = colourPool[0]
             # Remove from pool
@@ -509,11 +510,11 @@ rule plotPCA:
     input:
         rules.multiBamSummary.output
     output:
-        plot = 'qc/deeptools/plotPCA.png',
-        data = 'qc/deeptools/plotPCA.tab'
+        plot = 'qc/deepTools/plotPCA.png',
+        data = 'qc/deepTools/plotPCA.tab'
     params:
         labels = ' '.join(SAMPLES),
-        colours = setColours(RNASeq.groups())
+        colours = setColours(SAMPLES)
     log:
         'logs/plotPCA.log'
     conda:
@@ -551,8 +552,8 @@ rule featureCounts:
         bam = rules.markdupBAM.output.bam,
         gtf = rules.gff3ToGTF.output
     output:
-        counts = 'aligned/{sample}.featureCounts.txt',
-        qc = 'qc/featurecounts/{sample}.featureCounts.txt.summary'
+        counts = 'featureCounts/{sample}.featureCounts.txt',
+        qc = 'featureCounts/{sample}.featureCounts.txt.summary'
     params:
         paired = '-pC' if config['paired'] else '',
         strand = getStrand()
@@ -563,9 +564,9 @@ rule featureCounts:
     threads:
         config['threads']
     shell:
-        '(featureCounts {params.paired} -a {input.gtf} -o {output.counts} '
+        'featureCounts {params.paired} -a {input.gtf} -o {output.counts} '
         '{input.bam} -t exon -g gene_id -T {threads} -s {params.strand} '
-        '&& mv {output.counts}.summary {output.qc}) &> {log}'
+        '&> {log}'
 
 
 rule gff3ToGenePred:
@@ -613,7 +614,7 @@ rule readDistribution:
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
-        'qc/rseqc/readDistribution/{sample}.txt'
+        'qc/RSeQC/readDistribution/{sample}.txt'
     log:
         'logs/readDistribution/{sample}.log'
     conda:
@@ -636,12 +637,12 @@ rule geneBodyCoverage:
         indexes = expand('aligned/{sample}.markdup.bam.bai',
             sample=SAMPLES)
     output:
-        'qc/rseqc/geneBodyCoverage/data.geneBodyCoverage.txt',
-        'qc/rseqc/geneBodyCoverage/data.geneBodyCoverage.r',
-        'qc/rseqc/geneBodyCoverage/data.geneBodyCoverage.curves.pdf'
+        'qc/RSeQC/geneBodyCoverage/data.geneBodyCoverage.txt',
+        'qc/RSeQC/geneBodyCoverage/data.geneBodyCoverage.r',
+        'qc/RSeQC/geneBodyCoverage/data.geneBodyCoverage.curves.pdf'
     params:
         bams = getBams(),
-        prefix = lambda wc: f'qc/rseqc/geneBodyCoverage/data'
+        prefix = lambda wc: f'qc/RSeQC/geneBodyCoverage/data'
     log:
         'logs/geneBodyCoverage.log'
     conda:
@@ -657,17 +658,17 @@ rule innerDistance:
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
-        'qc/rseqc/innerDistance/{sample}.inner_distance_freq.txt',
-        'qc/rseqc/innerDistance/{sample}.inner_distance_plot.pdf',
-        'qc/rseqc/innerDistance/{sample}.inner_distance_plot.r',
-        'qc/rseqc/innerDistance/{sample}.inner_distance.txt'
+        'qc/RSeQC/innerDistance/{sample}.inner_distance_freq.txt',
+        'qc/RSeQC/innerDistance/{sample}.inner_distance_plot.pdf',
+        'qc/RSeQC/innerDistance/{sample}.inner_distance_plot.r',
+        'qc/RSeQC/innerDistance/{sample}.inner_distance.txt'
     params:
         lowerBound = -250,
         upperBound = 250,
         sampleSize = 1000000,
         stepSize = 5,
         mapQual = 30,
-        prefix = lambda wc: f'qc/rseqc/innerDistance/{wc.sample}'
+        prefix = lambda wc: f'qc/RSeQC/innerDistance/{wc.sample}'
     log:
         'logs/innerDistance/{sample}.log'
     conda:
@@ -684,12 +685,12 @@ rule readGC:
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
-        'qc/rseqc/readGC/{sample}.GC.xls',
-        'qc/rseqc/readGC/{sample}.GC_plot.r',
-        'qc/rseqc/readGC/{sample}.GC_plot.pdf'
+        'qc/RSeQC/readGC/{sample}.GC.xls',
+        'qc/RSeQC/readGC/{sample}.GC_plot.r',
+        'qc/RSeQC/readGC/{sample}.GC_plot.pdf'
     params:
         mapQual = 30,
-        prefix = lambda wc: f'qc/rseqc/readGC/{wc.sample}'
+        prefix = lambda wc: f'qc/RSeQC/readGC/{wc.sample}'
     log:
         'logs/readGC/{sample}.log'
     conda:
@@ -704,13 +705,13 @@ rule readDuplication:
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
-        'qc/rseqc/readDuplication/{sample}.pos.DupRate.xls',
-        'qc/rseqc/readDuplication/{sample}.seq.DupRate.xls',
-        'qc/rseqc/readDuplication/{sample}.DupRate_plot.r',
-        'qc/rseqc/readDuplication/{sample}.DupRate_plot.pdf'
+        'qc/RSeQC/readDuplication/{sample}.pos.DupRate.xls',
+        'qc/RSeQC/readDuplication/{sample}.seq.DupRate.xls',
+        'qc/RSeQC/readDuplication/{sample}.DupRate_plot.r',
+        'qc/RSeQC/readDuplication/{sample}.DupRate_plot.pdf'
     params:
         mapQual = 30,
-        prefix = lambda wc: f'qc/rseqc/readDuplication/{wc.sample}'
+        prefix = lambda wc: f'qc/RSeQC/readDuplication/{wc.sample}'
     log:
         'logs/readDuplication/{sample}.log'
     conda:
@@ -728,15 +729,15 @@ rule junctionAnnotation:
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
-        expand('qc/rseqc/junctionAnnotation/{{sample}}.{ext}',
+        expand('qc/RSeQC/junctionAnnotation/{{sample}}.{ext}',
             ext=['junction.bed', 'junction_plot.r',
                  'splice_events.pdf', 'junction.Interact.bed',
                  'junction.xls', 'splice_junction.pdf']),
-        txt = 'qc/rseqc/junctionAnnotation/{sample}.txt'
+        txt = 'qc/RSeQC/junctionAnnotation/{sample}.txt'
     params:
         minIntron = 50,
         mapQual = 30,
-        prefix = lambda wc: f'qc/rseqc/junctionAnnotation/{wc.sample}'
+        prefix = lambda wc: f'qc/RSeQC/junctionAnnotation/{wc.sample}'
     log:
         'logs/junctionAnnotation/{sample}.log'
     conda:
@@ -753,7 +754,7 @@ rule junctionSaturation:
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
-        expand('qc/rseqc/junctionSaturation/{{sample}}.{ext}',
+        expand('qc/RSeQC/junctionSaturation/{{sample}}.{ext}',
             ext=['junctionSaturation_plot.r',
                  'junctionSaturation_plot.pdf'])
     params:
@@ -763,7 +764,7 @@ rule junctionSaturation:
         minIntron = 50,
         minSpliceRead = 1,
         mapQual = 30,
-        prefix = lambda wc: f'qc/rseqc/junctionSaturation/{wc.sample}'
+        prefix = lambda wc: f'qc/RSeQC/junctionSaturation/{wc.sample}'
     log:
         'logs/junctionSaturation/{sample}.log'
     conda:
@@ -782,7 +783,7 @@ rule inferExperiment:
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
-        'qc/rseqc/inferExperiment/{sample}.txt'
+        'qc/RSeQC/inferExperiment/{sample}.txt'
     params:
         sampleSize = config['misc']['inferExperimentSampleSize']
     log:
@@ -799,7 +800,7 @@ rule bamStat:
         bam = 'aligned/{sample}.markdup.bam',
         index = 'aligned/{sample}.markdup.bam.bai'
     output:
-        'qc/rseqc/bamStat/{sample}.txt'
+        'qc/RSeQC/bamStat/{sample}.txt'
     params:
         mapQual = 30,
     log:
@@ -814,39 +815,36 @@ rule multiQC:
     input:
         expand('qc/fastqc/{single}.raw_fastqc.zip',
             single=RNASeq.singles()),
-        expand('qc/fastq_screen/{single}.fastq_screen.txt',
+        expand('qc/fastqScreen/{single}.fastq_screen.txt',
             single=RNASeq.singles()) if config['fastqScreen'] else [],
         expand('qc/cutadapt/{sample}.cutadapt.txt', sample=SAMPLES),
         expand('qc/fastqc/{single}.trim_fastqc.zip',
             single=RNASeq.singles()),
         expand('qc/kallisto/{sample}.stdout', sample=SAMPLES),
         expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
-        expand('qc/samtools/stats/{sample}.stats.txt', sample=SAMPLES),
-        expand('qc/samtools/idxstats/{sample}.idxstats.txt',
-            sample=SAMPLES),
-        expand('qc/samtools/flagstat/{sample}.flagstat.txt',
-            sample=SAMPLES),
-        'qc/deeptools/plotCorrelation.tsv',
-        'qc/deeptools/plotPCA.tab',
-        expand('qc/rseqc/{tool}/{sample}.txt', sample=SAMPLES,
+        expand('qc/samtools/{tool}/{sample}.{tool}.txt',
+            sample=SAMPLES, tool=['stats', 'idxstats', 'flagstat']),
+        'qc/deepTools/plotCorrelation.tsv',
+        'qc/deepTools/plotPCA.tab',
+        expand('qc/RSeQC/{tool}/{sample}.txt', sample=SAMPLES,
             tool=['readDistribution', 'junctionAnnotation',
                   'bamStat', 'inferExperiment']),
-        'qc/rseqc/geneBodyCoverage/data.geneBodyCoverage.txt',
-        expand('qc/rseqc/junctionSaturation/{sample}.junctionSaturation_plot.r',
+        'qc/RSeQC/geneBodyCoverage/data.geneBodyCoverage.txt',
+        expand('qc/RSeQC/junctionSaturation/{sample}.junctionSaturation_plot.r',
             sample=SAMPLES),
-        expand('qc/rseqc/readGC/{sample}.GC.xls', sample=SAMPLES),
-        expand('qc/rseqc/readDuplication/{sample}.pos.DupRate.xls',
+        expand('qc/RSeQC/readGC/{sample}.GC.xls', sample=SAMPLES),
+        expand('qc/RSeQC/readDuplication/{sample}.pos.DupRate.xls',
             sample=SAMPLES),
-        expand('qc/rseqc/innerDistance/{sample}.inner_distance_freq.txt',
+        expand('qc/RSeQC/innerDistance/{sample}.inner_distance_freq.txt',
             sample=SAMPLES) if config['paired'] else [],
-        expand('qc/featurecounts/{sample}.featureCounts.txt.summary',
+        expand('featureCounts/{sample}.featureCounts.txt.summary',
             sample=SAMPLES),
     output:
-        directory('qc/multiqc')
+        directory('qc/multiQC')
     params:
         config = f'--config {config["multiQCconfig"]}' if config["multiQCconfig"] else ''
     log:
-        'logs/multiqc/multiqc.log'
+        'logs/multiQC/multiQC.log'
     conda:
         f'{ENVS}/multiqc.yaml'
     shell:
