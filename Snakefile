@@ -72,6 +72,7 @@ else:
     assert config['strand'] in ['R', 'F', 'unstranded']
     reads = ['R1']
 
+
 rule all:
     input:
         'qc/multiQC'
@@ -109,10 +110,10 @@ rule modifyFastQC:
 
 def cutadaptOutput():
     if config['paired']:
-        return ['fastq/trimmed/{sample}-R1.trim.fastq.gz',
-                'fastq/trimmed/{sample}-R2.trim.fastq.gz']
+        return [temp('fastq/trimmed/{sample}-R1.trim.fastq.gz'),
+                temp('fastq/trimmed/{sample}-R2.trim.fastq.gz')]
     else:
-        return ['fastq/trimmed/{sample}-R1.trim.fastq.gz']
+        return [temp('fastq/trimmed/{sample}-R1.trim.fastq.gz')]
 
 
 def cutadaptCmd():
@@ -221,16 +222,13 @@ rule buildKallistoIndex:
 
 
 def kallistoCmd():
-    if config['paired']:
-        return ('kallisto quant -i {input.index} -o kallisto/{wildcards.sample}/ '
-                '-b {params.bootstraps} {params.strand} {input.reads} &> {log} '
-                '&& cp {log} {output.qc}')
-    else:
-        return ('kallisto quant -i {input.index} -o kallisto/{wildcards.sample}/ '
-                '-b {params.bootstraps} {params.strand} '
-                '--single -l {params.fragmentLength} -s {params.fragmentSD} '
-                '--threads {threads} {input.reads} &> {log} '
-                '&& cp {log} {output.qc}')
+    cmd = ('kallisto quant -i {input.index} -o kallisto/{wildcards.sample}/ '
+           '-b {params.bootstraps} --seed {params.seed} {params.strand} '
+           '--threads {threads} ')
+    if not config['paired']:
+        cmd += '--single -l {params.fragmentLength} -s {params.fragmentSD} '
+    cmd += '{input.reads} &> {log} && cp {log} {output.qc}'
+    return cmd
 
 
 def getKallistoStrand():
@@ -252,9 +250,10 @@ rule kallistoQuant:
         abundancesTSV = 'kallisto/{sample}/abundance.tsv',
         runInfo = 'kallisto/{sample}/run_info.json'
     params:
+        seed = 42,
+        fragmentSD = 2,
         bootstraps = 100,
         fragmentLength = 200,
-        fragmentSD = 2,
         strand = getKallistoStrand()
     log:
         'logs/kallistoQuant/{sample}.log'
@@ -329,7 +328,6 @@ rule hisat2:
     conda:
         f'{ENVS}/hisat2.yaml'
     threads:
-        #max(1, (config['threads'] / 2) - 1)
         max(1, config['threads'] - 1)
     shell:
         hisat2Cmd()
@@ -345,7 +343,6 @@ rule fixBAM:
     conda:
         f'{ENVS}/samtools.yaml'
     shell:
-        #'samtools fixmate -O bam,level=0 -m {input} {output} &> {log}'
         'samtools fixmate -O bam -m {input} {output} &> {log}'
 
 
@@ -391,7 +388,7 @@ rule indexBAM:
     conda:
         f'{ENVS}/samtools.yaml'
     threads:
-        max(1, (config['threads'] / 2) - 1,)
+        config['threads']
     shell:
         'samtools index -@ {threads} {input} &> {log}'
 
@@ -824,21 +821,21 @@ rule multiQC:
         expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
         expand('qc/samtools/{tool}/{sample}.{tool}.txt',
             sample=SAMPLES, tool=['stats', 'idxstats', 'flagstat']),
-        'qc/deepTools/plotCorrelation.tsv',
-        'qc/deepTools/plotPCA.tab',
+        #'qc/deepTools/plotCorrelation.tsv',
+        #'qc/deepTools/plotPCA.tab',
         expand('qc/RSeQC/{tool}/{sample}.txt', sample=SAMPLES,
             tool=['readDistribution', 'junctionAnnotation',
                   'bamStat', 'inferExperiment']),
-        'qc/RSeQC/geneBodyCoverage/data.geneBodyCoverage.txt',
+        #'qc/RSeQC/geneBodyCoverage/data.geneBodyCoverage.txt',
         expand('qc/RSeQC/junctionSaturation/{sample}.junctionSaturation_plot.r',
             sample=SAMPLES),
         expand('qc/RSeQC/readGC/{sample}.GC.xls', sample=SAMPLES),
-        expand('qc/RSeQC/readDuplication/{sample}.pos.DupRate.xls',
-            sample=SAMPLES),
+        #expand('qc/RSeQC/readDuplication/{sample}.pos.DupRate.xls',
+        #    sample=SAMPLES),
         expand('qc/RSeQC/innerDistance/{sample}.inner_distance_freq.txt',
             sample=SAMPLES) if config['paired'] else [],
-        expand('featureCounts/{sample}.featureCounts.txt.summary',
-            sample=SAMPLES),
+        #expand('featureCounts/{sample}.featureCounts.txt.summary',
+        #    sample=SAMPLES),
     output:
         directory('qc/multiQC')
     params:
