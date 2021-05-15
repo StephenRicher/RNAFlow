@@ -110,10 +110,10 @@ rule modifyFastQC:
 
 def cutadaptOutput():
     if config['paired']:
-        return [temp('fastq/trimmed/{sample}-R1.trim.fastq.gz'),
-                temp('fastq/trimmed/{sample}-R2.trim.fastq.gz')]
+        return ['fastq/trimmed/{sample}-R1.trim.fastq.gz',
+                'fastq/trimmed/{sample}-R2.trim.fastq.gz']
     else:
-        return [temp('fastq/trimmed/{sample}-R1.trim.fastq.gz')]
+        return ['fastq/trimmed/{sample}-R1.trim.fastq.gz']
 
 
 def cutadaptCmd():
