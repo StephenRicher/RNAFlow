@@ -40,7 +40,9 @@ default_config = {
          'GCcontent':       50                                ,},
     'misc':
         {'inferExperimentSampleSize': 200000                 ,
-         'sample'                   : 0                      ,},
+         'sample'                   : 0                      ,
+         'geneBodyCoverage'         : True                   ,
+         'readDuplication'          : True                   ,},
     'fastqScreen':         None                              ,
     'multiQCconfig':       None                              ,
 }
@@ -821,21 +823,22 @@ rule multiQC:
         expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
         expand('qc/samtools/{tool}/{sample}.{tool}.txt',
             sample=SAMPLES, tool=['stats', 'idxstats', 'flagstat']),
-        #'qc/deepTools/plotCorrelation.tsv',
-        #'qc/deepTools/plotPCA.tab',
+        'qc/deepTools/plotCorrelation.tsv',
+        'qc/deepTools/plotPCA.tab',
         expand('qc/RSeQC/{tool}/{sample}.txt', sample=SAMPLES,
             tool=['readDistribution', 'junctionAnnotation',
                   'bamStat', 'inferExperiment']),
-        #'qc/RSeQC/geneBodyCoverage/data.geneBodyCoverage.txt',
+        ('qc/RSeQC/geneBodyCoverage/data.geneBodyCoverage.txt'
+            if config['misc']['geneBodyCoverage'] else []),
         expand('qc/RSeQC/junctionSaturation/{sample}.junctionSaturation_plot.r',
             sample=SAMPLES),
         expand('qc/RSeQC/readGC/{sample}.GC.xls', sample=SAMPLES),
-        #expand('qc/RSeQC/readDuplication/{sample}.pos.DupRate.xls',
-        #    sample=SAMPLES),
+        expand('qc/RSeQC/readDuplication/{sample}.pos.DupRate.xls',
+            sample=SAMPLES) if config['misc']['readDuplication'] else [],
         expand('qc/RSeQC/innerDistance/{sample}.inner_distance_freq.txt',
             sample=SAMPLES) if config['paired'] else [],
-        #expand('featureCounts/{sample}.featureCounts.txt.summary',
-        #    sample=SAMPLES),
+        expand('featureCounts/{sample}.featureCounts.txt.summary',
+            sample=SAMPLES),
     output:
         directory('qc/multiQC')
     params:
