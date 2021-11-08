@@ -52,10 +52,12 @@ config = set_config(config, default_config)
 workdir: config['workdir']
 BUILD = config['genome']['build']
 
-RNASeq = Samples(config['data'], config['paired'])
+RNASeq = Samples(config['data'], config['paired'], config['strand'])
 
 # Extract sample names
 SAMPLES = RNASeq.samples()
+
+strandedness = RNASeq.getStrandedness()
 
 wildcard_constraints:
     sample = '|'.join(RNASeq.samples())
@@ -67,13 +69,13 @@ os.makedirs(config['tmpdir'], exist_ok=True)
 if config['cutadapt']['minimumLength'] < 1:
     config['cutadapt']['minimumLength'] = 1
 
-if config['paired']:
-    assert config['strand'] in ['RF', 'FR', 'unstranded']
-    reads = ['R1', 'R2']
-else:
-    assert config['strand'] in ['R', 'F', 'unstranded']
-    reads = ['R1']
-
+for strand in strandedness.values():
+    if config['paired']:
+        assert strand in ['RF', 'FR', 'unstranded']
+        reads = ['R1', 'R2']
+    else:
+        assert strand in ['R', 'F', 'unstranded']
+        reads = ['R1']
 
 rule all:
     input:
@@ -112,10 +114,10 @@ rule modifyFastQC:
 
 def cutadaptOutput():
     if config['paired']:
-        return ['fastq/trimmed/{sample}-R1.trim.fastq.gz',
-                'fastq/trimmed/{sample}-R2.trim.fastq.gz']
+        return [temp('fastq/trimmed/{sample}-R1.trim.fastq.gz'),
+                temp('fastq/trimmed/{sample}-R2.trim.fastq.gz')]
     else:
-        return ['fastq/trimmed/{sample}-R1.trim.fastq.gz']
+        return [temp('fastq/trimmed/{sample}-R1.trim.fastq.gz')]
 
 
 def cutadaptCmd():
@@ -233,10 +235,11 @@ def kallistoCmd():
     return cmd
 
 
-def getKallistoStrand():
-    if config['strand'] in ['F', 'FR']:
+def getKallistoStrand(wc):
+    strand = strandedness[wc.sample]
+    if strand in ['F', 'FR']:
         return '--fr-stranded'
-    elif config['strand'] in ['R', 'RF']:
+    elif strand in ['R', 'RF']:
         return '--rf-stranded'
     else:
         return ''
@@ -256,7 +259,7 @@ rule kallistoQuant:
         fragmentSD = 2,
         bootstraps = 100,
         fragmentLength = 200,
-        strand = getKallistoStrand()
+        strand = getKallistoStrand
     log:
         'logs/kallistoQuant/{sample}.log'
     conda:
@@ -298,9 +301,7 @@ def hisat2Cmd():
         command = 'hisat2 -1 {input[0]} -2 {input[1]} '
     else:
         command = 'hisat2 -U {input[0]} '
-    if config['strand'] != 'unstranded':
-        command += '--rna-strandness {params.strand} '
-    command += ('-x {params.index} --threads {threads} '
+    command += ('{params.strand} -x {params.index} --threads {threads} '
                 '--summary-file {output.qc} > {output.sam} 2> {log}')
     return command
 
@@ -316,6 +317,14 @@ def hisat2Input(wc):
             sample=wc.sample, read=reads)
 
 
+def getHisat2Strand(wc):
+    strand = strandedness[wc.sample]
+    if strand != 'unstranded':
+        return f'--rna-strandness {strand} '
+    else:
+        return ''
+
+
 rule hisat2:
     input:
         hisat2Input
@@ -324,7 +333,7 @@ rule hisat2:
         qc = 'qc/hisat2/{sample}.hisat2.txt'
     params:
         index = config['genome']['index'],
-        strand = config['strand']
+        strand = getHisat2Strand
     log:
         'logs/hisat2/{sample}.log'
     conda:
@@ -490,8 +499,9 @@ rule plotCorrelation:
 def setColours(samples):
     """ Find group and assign to specific colour. """
     colours = ''
-    colourPool = ['#E69F00', '#56B4E9', '#009E73', '#F0E442',
-                  '#0072B2', '#D55E00', '#CC79A7']
+    colourPool = ['#a6cee3', '#1f78b4', '#b2df8a', '#33a02c',
+                  '#fb9a99', '#e31a1c', '#fdbf6f', '#ff7f00',
+                  '#cab2d6', '#6a3d9a', '#ffff99', '#b15928']
     # Add double quotes for compatibility with shell
     colourPool = [f'"{colour}"' for colour in colourPool]
     usedColours = {}
@@ -524,10 +534,11 @@ rule plotPCA:
         '--outFileNameData {output.data} &> {log}'
 
 
-def getStrand():
-    if config['strand'] in ['F', 'FR']:
+def getStrand(wc):
+    strand = strandedness[wc.sample]
+    if strand in ['F', 'FR']:
         return 1
-    elif config['strand'] in ['R', 'RF']:
+    elif strand in ['R', 'RF']:
         return 2
     else:
         return 0
@@ -555,7 +566,7 @@ rule featureCounts:
         qc = 'featureCounts/{sample}.featureCounts.txt.summary'
     params:
         paired = '-pC' if config['paired'] else '',
-        strand = getStrand()
+        strand = getStrand
     log:
         'logs/featureCounts/{sample}.log'
     conda:

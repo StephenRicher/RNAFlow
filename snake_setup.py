@@ -66,13 +66,14 @@ def set_config(config, default, outer_key=''):
 
 class Samples:
 
-    def __init__(self, samplesFile: str, paired: bool, sep='\s+'):
+    def __init__(self, samplesFile: str, paired: bool, strand: dict, sep='\s+'):
         self.paired = paired
+        self.experimentStrand = strand
         self.table = self.readSamples(samplesFile, sep=sep)
 
 
     def readSamples(self, samplesFile, sep='\s+'):
-        usecols = ['group', 'rep', 'R1']
+        usecols = ['experiment', 'group', 'rep', 'R1']
         if self.paired:
             usecols = usecols.append('R1')
         table = pd.read_table(
@@ -109,6 +110,17 @@ class Samples:
         else:
             return R1
 
+    def getStrandedness(self):
+        strands = {}
+        for sample in self.samples():
+            # Get experiment associated with sample
+            experiment = (self.table
+                .loc[self.table['sample'] == sample, 'experiment'].to_list()[0])
+            # Get strand associated with experiment
+            strand = self.experimentStrand[experiment]
+            # Add sample names to dictionary
+            strands[sample] = strand
+        return strands
 
     def groupCompares(self):
         """ Return list of pairwise group comparison """
