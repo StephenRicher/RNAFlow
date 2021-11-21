@@ -111,7 +111,6 @@ rule modifyFastQC:
         '{SCRIPTS}/modifyFastQC.py {input} {output} '
         '{wildcards.sample}-{wildcards.read} &> {log}'
 
-
 def cutadaptOutput():
     if config['paired']:
         return [temp('fastq/trimmed/{sample}-R1.trim.fastq.gz'),
@@ -185,17 +184,21 @@ if config['fastqScreen']:
             txt = 'qc/fastqScreen/{sample}-{read}.fastq_screen.txt',
             png = 'qc/fastqScreen/{sample}-{read}.fastq_screen.png'
         params:
-            fastq_screen_config = config['fastqScreen'],
+            config = config['fastqScreen'],
             subset = 100000,
-            aligner = 'bowtie2'
         group:
             'processFASTQ'
         log:
             'logs/fastqScreen/{sample}-{read}.log'
+        conda:
+            f'{ENVS}/fastqScreen.yaml'
         threads:
             config['threads']
-        wrapper:
-            '0.49.0/bio/fastq_screen'
+        shell:
+            '{SCRIPTS}/fastqScreen.py {input} {params.config} '
+            '--subset {params.subset} --threads {threads} '
+            '--plotOut {output.png} --dataOut {output.txt} '
+            '> {output} 2> {log}'
 
 
 rule fastQCtrimmed:
@@ -374,19 +377,19 @@ rule sortBAM:
 
 rule markdupBAM:
     input:
-        rules.sortBAM.output
+        'aligned/{sample}.sort.bam'
     output:
         bam = 'aligned/{sample}.markdup.bam',
-        qc = 'qc/samtools/markdup/{sample}.txt'
+        qc = 'qc/markDuplicates/{sample}.markDuplicates.log'
+    params:
+        tmp = config['tmpdir']
     log:
-        'logs/markdupBAM/{sample}.log'
+        'logs/markDuplicates/{sample}.log'
     conda:
-        f'{ENVS}/samtools.yaml'
-    threads:
-        config['threads']
+        f'{ENVS}/picard.yaml'
     shell:
-        'samtools markdup -@ {threads} '
-        '-sf {output.qc} {input} {output.bam} &> {log}'
+        'picard MarkDuplicates I={input} O={output.bam} M={output.qc} '
+        'VALIDATION_STRINGENCY=LENIENT TMP_DIR={params.tmp} &> {log}'
 
 
 rule indexBAM:
@@ -834,8 +837,9 @@ rule multiQC:
         expand('qc/hisat2/{sample}.hisat2.txt', sample=SAMPLES),
         expand('qc/samtools/{tool}/{sample}.{tool}.txt',
             sample=SAMPLES, tool=['stats', 'idxstats', 'flagstat']),
-        'qc/deepTools/plotCorrelation.tsv',
-        'qc/deepTools/plotPCA.tab',
+        expand('qc/markDuplicates/{sample}.markDuplicates.log', sample=SAMPLES),
+        #'qc/deepTools/plotCorrelation.tsv',
+        #'qc/deepTools/plotPCA.tab',
         expand('qc/RSeQC/{tool}/{sample}.txt', sample=SAMPLES,
             tool=['readDistribution', 'junctionAnnotation',
                   'bamStat', 'inferExperiment']),
