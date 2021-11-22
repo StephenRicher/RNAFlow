@@ -197,8 +197,7 @@ if config['fastqScreen']:
         shell:
             '{SCRIPTS}/fastqScreen.py {input} {params.config} '
             '--subset {params.subset} --threads {threads} '
-            '--plotOut {output.png} --dataOut {output.txt} '
-            '> {output} 2> {log}'
+            '--plotOut {output.png} --dataOut {output.txt} &> {log}'
 
 
 rule fastQCtrimmed:
