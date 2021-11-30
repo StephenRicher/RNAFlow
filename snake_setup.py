@@ -86,8 +86,20 @@ class Samples:
         table['sample'] = (table[['group', 'rep']].apply(lambda x: '-'.join(x), axis=1))
 
         # Ensure no duplicate names
-        if table['sample'].duplicated().any():
-            raise ValueError(f'Duplicate sample name definitions in {samplesFile}.')
+        duplicateSamples = table['sample'].duplicated()
+        if duplicateSamples.any():
+            duplicates = list(table['sample'][duplicateSamples])
+            raise ValueError(f'Duplicate sample name definitions in {samplesFile} '
+                             f'- {duplicates}.')
+
+        if self.paired:
+            allFiles = pd.concat([table['R1'], table['R2']])
+        else:
+            allFiles = table['R1']
+        duplicateFiles = allFiles.duplicated()
+        if duplicateFiles.any():
+            raise ValueError(f'Duplicate file paths in {samplesFile} '
+                             f'- {list(allFiles[duplicateFiles])}')
 
         return table
 
