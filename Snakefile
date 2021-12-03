@@ -860,6 +860,6 @@ rule multiQC:
     log:
         'logs/multiQC/multiQC.log'
     conda:
-        f'{ENVS}/multiqc.yaml'
+        f'{ENVS}/python3.yaml'
     shell:
         'multiqc --outdir {output} --force {params.config} {input} &> {log}'
