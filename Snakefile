@@ -25,6 +25,7 @@ default_config = {
     'data':              ''          ,
     'paired':            ''          ,
     'strand':            ''          ,
+    'ignoreChrom':       None        ,
     'genome':
         {'build':         'genome'    ,
          'transcriptome': ''          ,
@@ -79,7 +80,8 @@ for strand in strandedness.values():
 
 rule all:
     input:
-        'qc/multiQC'
+        'qc/multiQC',
+        expand('bigWig/{sample}.bigWig', sample=SAMPLES)
 
 
 rule fastqc:
@@ -451,91 +453,6 @@ rule samtoolsFlagstat:
     shell:
         'samtools flagstat {input} > {output} 2> {log}'
 
-
-rule multiBamSummary:
-    input:
-        bams = expand('aligned/{sample}.markdup.bam',
-            sample=SAMPLES),
-        indexes = expand('aligned/{sample}.markdup.bam.bai',
-            sample=SAMPLES)
-    output:
-        'qc/deepTools/multiBamSummary.npz'
-    params:
-        binSize = 10000,
-        distanceBetweenBins = 0,
-        labels = ' '.join(SAMPLES),
-    log:
-        'logs/multiBamSummary.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    threads:
-        config['threads']
-    shell:
-        'multiBamSummary bins --bamfiles {input.bams} --outFileName {output} '
-        '--binSize {params.binSize} --labels {params.labels} '
-        '--distanceBetweenBins {params.distanceBetweenBins} '
-        '--numberOfProcessors {threads} &> {log}'
-
-
-rule plotCorrelation:
-    input:
-        rules.multiBamSummary.output
-    output:
-        plot = 'qc/deepTools/plotCorrelation.png',
-        matrix = 'qc/deepTools/plotCorrelation.tsv'
-    params:
-        corMethod = 'pearson',
-        colorMap = 'viridis',
-        labels = ' '.join(SAMPLES)
-    log:
-        'logs/plotCorrelation.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    shell:
-        'plotCorrelation --corData {input} --corMethod {params.corMethod} '
-        '--whatToPlot heatmap --labels {params.labels} --skipZeros '
-        '--colorMap {params.colorMap} --plotNumbers '
-        '--plotFile {output.plot} --outFileCorMatrix {output.matrix} &> {log}'
-
-
-def setColours(samples):
-    """ Find group and assign to specific colour. """
-    colours = ''
-    colourPool = ['#a6cee3', '#1f78b4', '#b2df8a', '#33a02c',
-                  '#fb9a99', '#e31a1c', '#fdbf6f', '#ff7f00',
-                  '#cab2d6', '#6a3d9a', '#ffff99', '#b15928']
-    # Add double quotes for compatibility with shell
-    colourPool = [f'"{colour}"' for colour in colourPool]
-    usedColours = {}
-    for sample in samples:
-        group = sample.split('-')[0]
-        if group not in usedColours:
-            usedColours[group] = colourPool[0]
-            # Remove from pool
-            colourPool = colourPool[1:]
-        colours += f'{usedColours[group]} '
-    return f'{colours}'
-
-
-rule plotPCA:
-    input:
-        rules.multiBamSummary.output
-    output:
-        plot = 'qc/deepTools/plotPCA.png',
-        data = 'qc/deepTools/plotPCA.tab'
-    params:
-        labels = ' '.join(SAMPLES),
-        colours = setColours(SAMPLES)
-    log:
-        'logs/plotPCA.log'
-    conda:
-        f'{ENVS}/deeptools.yaml'
-    shell:
-        'plotPCA --corData {input} --colors {params.colours} '
-        '--labels {params.labels} --plotFile {output.plot} '
-        '--outFileNameData {output.data} &> {log}'
-
-
 def getStrand(wc):
     strand = strandedness[wc.sample]
     if strand in ['F', 'FR']:
@@ -579,6 +496,156 @@ rule featureCounts:
         'featureCounts {params.paired} -a {input.gtf} -o {output.counts} '
         '{input.bam} -t exon -g gene_id -T {threads} -s {params.strand} '
         '&> {log}'
+
+
+rule generateScaleFactor:
+    input:
+        expand('featureCounts/{sample}.featureCounts.txt', sample=SAMPLES)
+    output:
+        'featureCounts/allScaleFactors.tsv'
+    log:
+        'logs/generateScaleFactor.log'
+    shell:
+        'Rscript {SCRIPTS}/getScaleFactors.R {input} > {output} 2> {log} '
+        
+
+rule multiBamSummary:
+    input:
+        bams = expand('aligned/{sample}.markdup.bam',
+            sample=SAMPLES),
+        indexes = expand('aligned/{sample}.markdup.bam.bai',
+            sample=SAMPLES)
+    output:
+        'qc/deepTools/multiBamSummary.npz'
+    params:
+        binSize = 10000,
+        distanceBetweenBins = 0,
+        labels = ' '.join(SAMPLES),
+    log:
+        'logs/multiBamSummary.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
+    shell:
+        'multiBamSummary bins --bamfiles {input.bams} --outFileName {output} '
+        '--binSize {params.binSize} --labels {params.labels} '
+        '--distanceBetweenBins {params.distanceBetweenBins} '
+        '--numberOfProcessors {threads} &> {log}'
+
+def setStrandFilter(wc):
+    strand = getStrand(wc)
+    if strand == 0:
+        return ''
+    elif strand == 1:
+        return '--filterRNAstrand reverse'
+    else:
+        return '--filterRNAstrand forward'
+
+def ignoreChrom(wc):
+    if config['ignoreChrom'] is None:
+        return ''
+    else:
+        chroms = []
+        with open(config['ignoreChrom']) as fh:
+            for chrom in fh:
+                chroms.append(chrom.strip())
+        if len(chroms) == 0:
+            return ''
+        else:
+            return f'--ignoreForNormalization {" ".join(chroms)}'
+
+def getScaleFactor(wc):
+    with open('featureCounts/allScaleFactors.tsv') as fh:
+        for line in fh:
+            sample, factor = line.strip().split()
+            if sample == wc.sample:
+                return factor
+
+rule bamCoverage:
+    input:
+        bam = 'aligned/{sample}.markdup.bam',
+        index = 'aligned/{sample}.markdup.bam.bai',
+        scaleFactors = rules.generateScaleFactor.output
+    output:
+        'bigWig/{sample}.bigWig'
+    params:
+        binSize = 50,
+        scaleFactor = getScaleFactor,
+        filterRNAstrand = setStrandFilter,
+        ignoreChromForNormalisation = ignoreChrom
+    log:
+        'logs/bamCoverage/{sample}.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    threads:
+        config['threads']
+    shell:
+        'bamCoverage --bam {input.bam} --outFileName {output} '
+        '{params.filterRNAstrand} '
+        '--binSize {params.binSize} --scaleFactor {params.scaleFactor} '
+        '--skipNonCoveredRegions --numberOfProcessors {threads} '
+        '--verbose &> {log}'
+
+
+rule plotCorrelation:
+    input:
+        rules.multiBamSummary.output
+    output:
+        plot = 'qc/deepTools/plotCorrelation.png',
+        matrix = 'qc/deepTools/plotCorrelation.tsv'
+    params:
+        corMethod = 'pearson',
+        colorMap = 'viridis',
+        labels = ' '.join(SAMPLES)
+    log:
+        'logs/plotCorrelation.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    shell:
+        'plotCorrelation --corData {input} --corMethod {params.corMethod} '
+        '--whatToPlot heatmap --labels {params.labels} --skipZeros '
+        '--colorMap {params.colorMap} --plotNumbers '
+        '--plotFile {output.plot} --outFileCorMatrix {output.matrix} &> {log}'
+
+
+def setColours(samples):
+    """ Find group and assign to specific colour. """
+    colours = ''
+    colourPool = ['#a6cee3', '#1f78b4', '#b2df8a', '#33a02c',
+                  '#fb9a99', '#e31a1c', '#fdbf6f', '#ff7f00',
+                  '#cab2d6', '#6a3d9a', '#ffff99', '#b15928',
+                  '#000000', '#ff0000']
+    # Add double quotes for compatibility with shell
+    colourPool = [f'"{colour}"' for colour in colourPool]
+    usedColours = {}
+    for sample in samples:
+        group = sample.split('-')[0]
+        if group not in usedColours:
+            usedColours[group] = colourPool[0]
+            # Remove from pool
+            colourPool = colourPool[1:]
+        colours += f'{usedColours[group]} '
+    return f'{colours}'
+
+
+rule plotPCA:
+    input:
+        rules.multiBamSummary.output
+    output:
+        plot = 'qc/deepTools/plotPCA.png',
+        data = 'qc/deepTools/plotPCA.tab'
+    params:
+        labels = ' '.join(SAMPLES),
+        colours = setColours(SAMPLES)
+    log:
+        'logs/plotPCA.log'
+    conda:
+        f'{ENVS}/deeptools.yaml'
+    shell:
+        'plotPCA --corData {input} --colors {params.colours} '
+        '--labels {params.labels} --plotFile {output.plot} '
+        '--outFileNameData {output.data} &> {log}'
 
 
 rule gff3ToGenePred:
